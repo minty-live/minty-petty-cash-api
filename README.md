@@ -1,7 +1,7 @@
 # minty-petty-cash-api
 
 The Django home of Minty's Petty Cash API - the day's petty cash report that
-[minty-petty-cash-web](https://github.com/minty-oliveandvine/minty-petty-cash-web) reads and
+[minty-petty-cash-web](https://github.com/minty-live/minty-petty-cash-web) reads and
 writes. It serves **the same paths and JSON** as Flask's `blueprints/petty_cash_api`
 (`/api/petty-cash/v1/companies/{entity_id}/...`), so the web app moves here by changing
 `PETTY_CASH_API_URL`. Flask (Minty) stays the token minter and Xero's only credential holder.
