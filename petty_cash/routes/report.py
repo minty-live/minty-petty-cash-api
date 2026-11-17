@@ -3,8 +3,11 @@
 - ``GET /reports/{id}``: the Daily Report - status, the figures, sales by method, the expense lines
   with their receipts, the cash, the audit facts and what this person may do.
 - ``POST /reports/{id}/reopen``: back to a draft at Opening (the latest report only).
-- ``DELETE /reports/{id}``: the latest report, with its lines, receipts and counts. A report in
-  Xero may be deleted (the owner, 2026-10-15) - the app warns, reading ``was_published``.
+- ``DELETE /reports/{id}``: the latest report, with its lines, receipts and counts. A report that
+  has been to Xero needs the publish right (accountant and up) and has its recorded entries taken
+  out of Xero first (owner, 2026-11-17; ``services/unpublish.py``): if Xero refuses any, the report
+  is kept - 409 ``{error, reasons}``. With no record of its entries it is deleted as before and they
+  stay in Xero (the app warns, reading ``xero_removable``).
 - ``POST /reports/{id}/share-link``: a read-only link to the day, valid 30 days - ``{url, path,
   expires_at}``; the apps show it at their own ``/share/{path}``, read through the public
   ``GET /api/petty-cash/v1/public/share/{path}`` (``public_share.py``).
@@ -34,7 +37,12 @@ from minty_db.models import Report
 from ninja import Router
 
 from core.exceptions import Refused
-from core.policy import Permission, can_delete_report, can_view_report, has_permission
+from core.policy import (
+    Permission,
+    can_edit_report,
+    can_view_report,
+    has_permission,
+)
 from petty_cash.days import hk
 from petty_cash.money import cents, out
 from petty_cash.routes._input import form_and_files, json_body
@@ -48,6 +56,7 @@ from petty_cash.services.publish_reasons import publish_reasons
 from petty_cash.services.report_actions import (
     ReportActionRefused,
     delete_report,
+    may_delete,
     newer_exists,
     reopen_report,
     was_published,
@@ -64,6 +73,7 @@ from petty_cash.services.reports import currency_code, is_stale_draft, previous_
 from petty_cash.services.sales import cash_sales_from_detail, report_methods, sales_groups
 from petty_cash.services.share import ShareRefused, create_share_link
 from petty_cash.services.xero_settings import minty_on_its_own
+from petty_cash.xero import publish_record
 
 router = Router()
 
@@ -151,6 +161,8 @@ def report_payload(request, report: Report) -> dict:
         "publishing_status": facts["publishing_status"],
         "xero_integrated": bool(report.xero_integrated),
         "was_published": was_published(report),
+        # a delete can find its entries in Xero and take them out (else they stay there; 2026-11-17)
+        "xero_removable": bool(publish_record.load_record(report.id, publish_record.current_org(entity_id))["objects"]),
         "kpis": figures["kpis"],
         "sales": {**figures["sales"], "yesterday_total": yesterday, "history": history},
         "expenses": {
@@ -167,9 +179,10 @@ def report_payload(request, report: Report) -> dict:
         },
         "closing_balance": figures["closing_balance"],
         "permissions": {
-            "edit": status != "draft" and latest and has_permission(user, Permission.REPORT_EDIT_OWN, entity_id),
+            "edit": status != "draft" and latest and can_edit_report(user, report),
             # a stale draft (dated before the last submitted day) may go though it is not the latest
-            "delete": (latest or is_stale_draft(report)) and can_delete_report(user, report),
+            # in Xero: accountant and up, its entries coming out of Xero with it (owner, 2026-11-17)
+            "delete": (latest or is_stale_draft(report)) and may_delete(user, report),
             "publish": has_permission(user, Permission.REPORT_PUBLISH, entity_id)
             and not minty_on_its_own(entity_id),  # Xero optional: nowhere to publish to
             "share": status != "draft",
@@ -190,7 +203,7 @@ def reopen(request, report_id: str):
     try:
         reopen_report(report, request.auth_user)
     except ReportActionRefused as refused:
-        raise Refused(refused.message, refused.status) from None
+        raise Refused(refused.message, refused.status, **refused.extra) from None
     return {"report_id": str(report.id), "transaction_date": report.transaction_date.isoformat(),
             "status": "draft", "next": "opening"}
 
@@ -201,7 +214,7 @@ def delete(request, report_id: str):
     try:
         delete_report(report, request.auth_user)
     except ReportActionRefused as refused:
-        raise Refused(refused.message, refused.status) from None
+        raise Refused(refused.message, refused.status, **refused.extra) from None
     return {"deleted": str(report.id), "transaction_date": report.transaction_date.isoformat(), "next": "dashboard"}
 
 

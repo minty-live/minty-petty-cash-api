@@ -23,7 +23,7 @@ import logging
 
 from django.db import DatabaseError
 from django.utils import timezone
-from minty_db.models import XeroReportSync
+from minty_db.models import Entity, XeroReportSync
 
 logger = logging.getLogger("petty-cash-api")
 
@@ -42,10 +42,15 @@ def load_record(report_id, current_org_id=None) -> dict:
     if not report_id:
         return _empty(current_org_id)
     row = XeroReportSync.objects.filter(report_id=report_id).first()
-    if row is None or not row.xero_response_text:
+    return _parse(report_id, row.xero_response_text if row else None, current_org_id)
+
+
+def _parse(report_id, text, current_org_id=None) -> dict:
+    """A stored record, or an empty one (unreadable, or another organisation's)."""
+    if not text:
         return _empty(current_org_id)
     try:
-        record = json.loads(row.xero_response_text)
+        record = json.loads(text)
     except (ValueError, TypeError):
         logger.warning("xero_report_sync for report %s is not valid JSON; treating the report as unpublished",
                        report_id)
@@ -60,6 +65,19 @@ def load_record(report_id, current_org_id=None) -> dict:
     record.setdefault("version", RECORD_VERSION)
     record.setdefault("org", recorded_org)
     return record
+
+
+def current_org(entity_id):
+    """The company's Xero organisation now (``entities.xero_org_id``), or None."""
+    return Entity.objects.filter(id=entity_id).values_list("xero_org_id", flat=True).first()
+
+
+def recorded_reports(report_ids, current_org_id=None) -> set[str]:
+    """Which of ``report_ids`` have objects recorded for the current organisation - what a delete
+    can find in Xero and remove (owner, 2026-11-17). One query for a page of reports."""
+    rows = XeroReportSync.objects.filter(report_id__in=list(report_ids)).values_list("report_id",
+                                                                                 "xero_response_text")
+    return {str(report_id) for report_id, text in rows if _parse(report_id, text, current_org_id)["objects"]}
 
 
 def _save(report_id, record: dict) -> None:

@@ -396,34 +396,36 @@ def discrepancy(run: Run, report: Report, existing) -> tuple[int, int]:
 # ---- what no longer applies ------------------------------------------------------------------
 
 
-def _delete_transaction(run: Run, xero_id) -> bool:
+def _delete_transaction(run: Run, xero_id) -> tuple[bool, str | None]:
+    """Delete a bank transaction: ``(True, None)``, or ``(False, why)`` in plain English."""
     if not xero_id:
-        return False
+        return False, None
     try:
         response = client.post(f"BankTransactions/{xero_id}", run.access_token, run.org,
                                {"bankTransactions": [{"bankTransactionID": xero_id, "status": "DELETED"}]})
     except requests.RequestException as exc:
         logger.error("Publish: deleting transaction %s failed: %s", xero_id, exc)
-        return False
+        return False, "could not reach Xero, please try again"
     if response.status_code == 200:
-        return True
+        return True, None
     logger.error("Publish: Xero refused deleting transaction %s: %s", xero_id, response.status_code)
-    return False
+    return False, translate_xero_error(response.status_code, response.text, subject="account")
 
 
-def _void_invoice(run: Run, xero_id) -> bool:
-    """Xero refuses to void an invoice with payments: the id is then kept, so the next run tries again."""
+def _void_invoice(run: Run, xero_id) -> tuple[bool, str | None]:
+    """Xero refuses to void an invoice with payments: the id is then kept, so the next run tries again.
+    ``(True, None)``, or ``(False, why)`` in plain English."""
     if not xero_id:
-        return False
+        return False, None
     try:
         response = _invoice_call(run, {"Invoices": [{"InvoiceID": xero_id, "Status": "VOIDED"}]}, xero_id)
     except requests.RequestException as exc:
         logger.error("Publish: voiding invoice %s failed: %s", xero_id, exc)
-        return False
+        return False, "could not reach Xero, please try again"
     if response.status_code == 200:
-        return True
+        return True, None
     logger.error("Publish: Xero refused voiding invoice %s: %s", xero_id, (response.text or "")[:300])
-    return False
+    return False, translate_xero_error(response.status_code, response.text, subject="account")
 
 
 def sweep_removed(run: Run, report: Report) -> None:
@@ -436,7 +438,7 @@ def sweep_removed(run: Run, report: Report) -> None:
             return
         live = {str(i) for i in ReportExpense.objects.filter(report_id=report.id).values_list("id", flat=True)}
         for line_id, xero_id in publish_record.recorded_expense_ids(record).items():
-            if line_id not in live and _delete_transaction(run, xero_id):
+            if line_id not in live and _delete_transaction(run, xero_id)[0]:
                 publish_record.forget_object(report.id, "expenses", source_id=line_id)
         zeroed = []
         if not (report.discrepancy_amount and report.discrepancy_type in ("over", "short")):
@@ -451,11 +453,11 @@ def sweep_removed(run: Run, report: Report) -> None:
                 continue
             logger.info("Publish: %s no longer applies to report %s; removing %s", module, report.id, entry["id"])
             if object_type == "BANK_TRANSACTION":
-                removed = _delete_transaction(run, entry["id"])
+                removed, _ = _delete_transaction(run, entry["id"])
             elif object_type == "BANK_TRANSFER":
                 removed, _ = _delete_transfer(run, entry["id"])
             else:
-                removed = _void_invoice(run, entry["id"])
+                removed, _ = _void_invoice(run, entry["id"])
             if removed:
                 publish_record.forget_object(report.id, module)
     except Exception:

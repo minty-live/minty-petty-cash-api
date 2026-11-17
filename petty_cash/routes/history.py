@@ -28,7 +28,7 @@ from minty_db.enums import ReportStatus
 from ninja import Router
 
 from core.exceptions import Refused
-from core.policy import Permission, can_delete_report, has_permission
+from core.policy import Permission, can_delete_report, has_permission, report_edit_rule
 from petty_cash.days import hk
 from petty_cash.money import out
 from petty_cash.routes.close import _iso
@@ -39,6 +39,7 @@ from petty_cash.services.report_actions import was_published
 from petty_cash.services.report_page import report_status
 from petty_cash.services.reports import currency_code, last_submitted
 from petty_cash.services.xero_settings import minty_on_its_own
+from petty_cash.xero.publish_record import current_org, recorded_reports
 
 router = Router()
 
@@ -89,7 +90,10 @@ def history(request):
     data = report_history(entity_id, **filters)
     failed = [r.id for r in data["reports"] if r.publishing_status == "failed"]
     reasons = publish_reasons(entity_id, failed) if failed else {}
-    may_edit = has_permission(person, Permission.REPORT_EDIT_OWN, entity_id)
+    may_edit = report_edit_rule(person, entity_id)  # a cashier: only their own reports
+    # report_actions.may_delete, its publish right read once: a report in Xero needs accountant and up
+    may_publish = has_permission(person, Permission.REPORT_PUBLISH, entity_id)
+    removable = recorded_reports([r.id for r in data["reports"]], current_org(entity_id))
     latest_id = data["latest_report_id"]
     last = last_submitted(entity_id)  # a draft dated before it is stale: deletable, never latest
 
@@ -118,10 +122,16 @@ def history(request):
             "publishing_status": str(report.publishing_status) if report.publishing_status is not None else None,
             # it has been to Xero, even if edited since: the delete warns (as GET /reports/{id})
             "was_published": was_published(report),
+            "xero_removable": str(report.id) in removable,  # a delete takes its entries out of Xero
             "publish_reasons": reasons.get(str(report.id), []),
             "permissions": {
-                "edit": latest and not draft and may_edit,
-                "delete": ((latest and not draft) or stale) and can_delete_report(person, report),
+                "edit": latest and not draft and may_edit(report),
+                "delete": ((latest and not draft) or stale) and can_delete_report(person, report)
+                and (not was_published(report) or may_publish),
+                # the report view's Edit Details (may_edit_details): the details that move no
+                # balance, on a submitted report older than the latest (owner, 2026-11-17)
+                "edit_details": not draft and not latest and report.publishing_status != "publishing"
+                and may_edit(report),
             },
         })
     return {

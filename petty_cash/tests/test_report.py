@@ -82,8 +82,9 @@ def test_the_daily_report_brings_the_day_and_what_may_be_done(client, shop, note
     assert body["cash"]["difference"] == {"amount": 0, "kind": "none", "reason": ""}
     assert body["closing_balance"] == 55 and body["submitted_at"].endswith("+08:00")
     assert body["submitted_by"] == "Olive Owner" and body["company_name"] == "Acme Shop"
-    assert body["permissions"] == {"edit": True, "delete": True, "publish": True, "share": True, "edit_details": True}
-    assert body["options"] == {"suppliers": [], "accounts": []}
+    assert body["permissions"] == {"edit": True, "delete": True, "publish": True, "share": True,
+                                   "edit_details": False}  # the latest: its edit is Edit Report
+    assert body["options"] is None  # only with edit_details
 
 
 def test_the_daily_report_brings_the_cash_count_as_the_cash_count_step_read_it(client, shop, notes):
@@ -249,6 +250,25 @@ def test_only_the_latest_report_can_be_reopened(client, shop, notes):
     assert resp.status_code == 400
     assert resp.json()["error"] == "You can only edit the most recent report. Delete or edit the newer reports first."
     assert Report.objects.get(id=older.id).status == "submitted"
+
+
+def test_a_cashier_reopens_only_a_report_they_created(client, shop, notes):
+    """Owner, 2026-11-17: a cashier edits only their own reports; a shop manager anyone's."""
+    report = _submitted(client, shop, notes)  # the owner's
+    cashier, manager = make_user("cashier@test.com"), make_user("manager@test.com")
+    UserEntity.objects.create(user_id=cashier.id, entity_id=shop.entity.id, role=EntityRole.CASHIER, approved=True)
+    UserEntity.objects.create(user_id=manager.id, entity_id=shop.entity.id, role=EntityRole.SHOP_MANAGER,
+                              approved=True)
+
+    assert _get(client, shop, report.id, user=cashier).json()["permissions"]["edit"] is False
+    refused = _post(client, shop, report.id, "/reopen", user=cashier)
+    assert refused.status_code == 403 and refused.json() == {"error": "You do not have permission to edit this report."}
+    assert Report.objects.get(id=report.id).status == "submitted"
+    assert _get(client, shop, report.id, user=manager).json()["permissions"]["edit"] is True
+
+    _set(report, created_by=cashier.id)
+    assert _get(client, shop, report.id, user=cashier).json()["permissions"]["edit"] is True
+    assert _post(client, shop, report.id, "/reopen", user=cashier).status_code == 200
 
 
 def test_a_cashier_may_not_delete_someone_elses_report_and_a_base_member_cannot_see_it(client, shop, notes):

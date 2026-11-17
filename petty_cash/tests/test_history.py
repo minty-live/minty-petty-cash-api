@@ -11,7 +11,7 @@ from datetime import timedelta
 
 import pytest
 from minty_db.enums import EntityRole
-from minty_db.models import ReportHistory, UserEntity
+from minty_db.models import Report, ReportHistory, UserEntity
 
 from petty_cash.tests.conftest import headers, make_entity, make_report, make_user, url
 from petty_cash.tests.test_close import D3
@@ -85,8 +85,9 @@ def test_one_page_newest_first_with_what_may_be_done(client, shop, flask):
     assert first["created_at"].endswith("+08:00") and first["submitted_at"] is None
     assert first["was_published"] is False and second["was_published"] is True
     assert (first["publishing_status"], second["publishing_status"]) == ("unpublished", "failed")
-    assert first["permissions"] == {"edit": True, "delete": True}
-    assert second["status_label"] == "Publish failed" and second["permissions"] == {"edit": False, "delete": False}
+    assert first["permissions"] == {"edit": True, "delete": True, "edit_details": False}
+    assert second["status_label"] == "Publish failed"
+    assert second["permissions"] == {"edit": False, "delete": False, "edit_details": True}
     assert second["publish_reasons"] == [REASON]
     assert {k: body[k] for k in ("page", "per_page", "total_pages", "total_count", "latest_report_id",
                                  "can_publish", "currency_code")} == {
@@ -153,14 +154,26 @@ def test_a_bad_filter_is_refused(client, shop, flask, query, message):
     assert resp.status_code == 422 and resp.json() == {"error": message}
 
 
-def test_a_cashier_may_edit_but_not_delete_someone_elses_latest_report(client, shop, flask):
-    _older(shop, days_back=0)
-    cashier = make_user("cashier@test.com")
+def test_a_cashier_edits_only_reports_they_created(client, shop, flask):
+    """Owner, 2026-11-17: a cashier edits (reopens or Edit Details) only their own reports; a shop
+    manager anyone's."""
+    latest = _older(shop, days_back=0)
+    older = _older(shop, days_back=1)
+    cashier, manager = make_user("cashier@test.com"), make_user("manager@test.com")
     UserEntity.objects.create(user_id=cashier.id, entity_id=shop.entity.id, role=EntityRole.CASHIER, approved=True)
+    UserEntity.objects.create(user_id=manager.id, entity_id=shop.entity.id, role=EntityRole.SHOP_MANAGER,
+                              approved=True)
 
-    row = _get(client, shop, user=cashier).json()["reports"][0]
+    def rows(user):
+        return {r["id"]: r["permissions"] for r in _get(client, shop, user=user).json()["reports"]}
 
-    assert row["permissions"] == {"edit": True, "delete": False}
+    assert rows(cashier) == {str(latest.id): {"edit": False, "delete": False, "edit_details": False},
+                             str(older.id): {"edit": False, "delete": False, "edit_details": False}}
+    assert rows(manager) == {str(latest.id): {"edit": True, "delete": True, "edit_details": False},
+                             str(older.id): {"edit": False, "delete": False, "edit_details": True}}
+    Report.objects.filter(id__in=[latest.id, older.id]).update(created_by=cashier.id)
+    assert rows(cashier) == {str(latest.id): {"edit": True, "delete": True, "edit_details": False},
+                             str(older.id): {"edit": False, "delete": False, "edit_details": True}}
 
 
 def test_an_empty_history_is_one_empty_page(client, shop, flask):
@@ -211,4 +224,29 @@ def test_a_stale_draft_in_the_history_may_be_deleted(client, shop, flask):
 
     rows = {r["id"]: r for r in _get(client, shop).json()["reports"]}
 
-    assert rows[str(stale.id)]["permissions"] == {"edit": False, "delete": True}
+    assert rows[str(stale.id)]["permissions"] == {"edit": False, "delete": True, "edit_details": False}
+
+
+def test_edit_details_is_offered_on_an_older_submitted_report_not_being_published(client, shop, flask):
+    """The report view's Edit Details rule (``may_edit_details``), per row: details that move no
+    balance may change on a submitted report older than the latest, whose own edit is Edit (reopen)
+    (owner, 2026-11-17)."""
+    latest = _older(shop, days_back=0)
+    older = _older(shop, days_back=2)
+    publishing = _older(shop, days_back=3, publishing_status="publishing")
+    draft = _older(shop, days_back=5, status="draft", current_section="sales")
+
+    rows = {r["id"]: r["permissions"]["edit_details"] for r in _get(client, shop).json()["reports"]}
+
+    assert rows == {str(latest.id): False, str(older.id): True, str(publishing.id): False, str(draft.id): False}
+
+
+def test_edit_details_needs_the_report_edit_right(client, shop, flask):
+    _older(shop, days_back=0)
+    base = make_user("base@test.com")
+    UserEntity.objects.create(user_id=base.id, entity_id=shop.entity.id, role=EntityRole.ENTITY_BASE, approved=True)
+
+    resp = _get(client, shop, user=base)
+
+    assert resp.status_code == 200, resp.json()
+    assert resp.json()["reports"][0]["permissions"] == {"edit": False, "delete": False, "edit_details": False}

@@ -29,7 +29,7 @@ from minty_db.models import (
     XeroContactSync,
 )
 
-from core.policy import Permission, has_permission
+from core.policy import can_edit_report
 from petty_cash.files import storage
 from petty_cash.services.expenses import (
     ExpenseRefused,
@@ -38,6 +38,7 @@ from petty_cash.services.expenses import (
     find_supplier,
     replace_receipts,
 )
+from petty_cash.services.report_actions import newer_exists
 from petty_cash.services.reports import log_history
 
 logger = logging.getLogger("petty-cash-api")
@@ -48,6 +49,7 @@ WITHDRAWAL_TYPES = ("personal", "company")
 NO_RIGHT = "It looks like you don't have permission to edit this report."
 DRAFT = "This report is still a draft. Change it in the Daily Closing."
 PUBLISHING = "Xero is still publishing this report. Wait until it finishes, then edit it."
+LATEST = "This is the latest report. Use Edit Report to change it."
 
 
 class EditRefused(Exception):
@@ -62,16 +64,20 @@ class EditRefused(Exception):
 def may_edit_details(report: Report, user) -> bool:
     """``check_editable`` as a yes/no - the Daily Report's ``permissions.edit_details``."""
     return (report.status != ReportStatus.DRAFT and report.publishing_status != "publishing"
-            and has_permission(user, Permission.REPORT_EDIT_OWN, report.entity_id))
+            and can_edit_report(user, report) and newer_exists(report))
 
 
 def check_editable(report: Report, user) -> None:
-    if not has_permission(user, Permission.REPORT_EDIT_OWN, report.entity_id):
+    # a cashier edits only the reports they created; a shop manager and up anyone's (owner, 2026-11-17)
+    if not can_edit_report(user, report):
         raise EditRefused(NO_RIGHT, 403)
     if report.status == ReportStatus.DRAFT:
         raise EditRefused(DRAFT, 409)
     if report.publishing_status == "publishing":
         raise EditRefused(PUBLISHING, 409)
+    # the latest report's own edit is Edit Report, which reopens it (owner, 2026-11-17)
+    if not newer_exists(report):
+        raise EditRefused(LATEST, 409)
 
 
 def mark_diverged_from_xero(report: Report) -> None:

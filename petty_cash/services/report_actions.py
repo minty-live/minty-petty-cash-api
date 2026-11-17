@@ -32,7 +32,7 @@ from minty_db.models import (
     XeroReportSync,
 )
 
-from core.policy import Permission, can_delete_report, has_permission
+from core.policy import Permission, can_delete_report, can_edit_report, has_permission
 from petty_cash.files import storage
 from petty_cash.services.denominations import refresh_cash_stock
 from petty_cash.services.reports import is_stale_draft
@@ -42,15 +42,19 @@ logger = logging.getLogger("petty-cash-api")
 PUBLISHING = "publishing"
 NEWER_REOPEN = "You can only edit the most recent report. Delete or edit the newer reports first."
 NEWER_DELETE = "I can only delete the most recent report, and there's a newer one after this."
+IN_XERO_RIGHT = "Only an accountant or admin can delete a report that's in Xero."
+STILL_PUBLISHING_DELETE = "Xero is still publishing this report. Wait until it finishes before deleting it."
 
 
 class ReportActionRefused(Exception):
-    """A reopen or delete the rules refuse: the sentence and the HTTP status to answer with."""
+    """A reopen or delete the rules refuse: the sentence and the HTTP status to answer with, and any
+    key the app routes on (``reasons``: what Xero refused; ``reconnect``)."""
 
-    def __init__(self, message: str, status: int):
+    def __init__(self, message: str, status: int, **extra):
         super().__init__(message)
         self.message = message
         self.status = status
+        self.extra = extra
 
 
 def was_published(report: Report) -> bool:
@@ -65,7 +69,8 @@ def newer_exists(report: Report) -> bool:
 def reopen_report(report: Report, user) -> Report:
     """Turn the latest submitted (or published) report back into a draft at Opening, its figures
     and Xero markers kept."""
-    if not has_permission(user, Permission.REPORT_EDIT_OWN, report.entity_id):
+    # a cashier reopens only the reports they created; a shop manager and up anyone's (owner, 2026-11-17)
+    if not can_edit_report(user, report):
         raise ReportActionRefused("You do not have permission to edit this report.", 403)
     with transaction.atomic():
         locked = Report.objects.select_for_update().get(id=report.id)
@@ -85,22 +90,50 @@ def reopen_report(report: Report, user) -> Report:
     return locked
 
 
+def may_delete(user, report: Report) -> bool:
+    """The delete right, and for a report that has been to Xero the publish right too: its entries
+    come out of Xero with it (owner, 2026-11-17: accountant and up)."""
+    return can_delete_report(user, report) and (
+        not was_published(report) or has_permission(user, Permission.REPORT_PUBLISH, report.entity_id))
+
+
+def _refuse_undeletable(report: Report, *, claimed: bool = False) -> bool:
+    """Publishing (unless this delete claimed it) is 409, a newer report 400. Whether it is a stale
+    draft: a draft dated before the last submitted day may go though it is not the latest - nothing
+    can finish it, and nothing after it depends on it (owner, 2026-10-26)."""
+    if report.publishing_status == PUBLISHING and not claimed:
+        raise ReportActionRefused(STILL_PUBLISHING_DELETE, 409)
+    stale = is_stale_draft(report)
+    if newer_exists(report) and not stale:
+        raise ReportActionRefused(NEWER_DELETE, 400)
+    return stale
+
+
 def delete_report(report: Report, user) -> None:
     """Delete the latest report with everything hanging off it; its receipt files go after the
-    commit, so a failed delete keeps the report AND its files."""
+    commit, so a failed delete keeps the report AND its files. A report in Xero has its entries
+    taken out of Xero first, and is kept if Xero refuses any (``services/unpublish.py``)."""
+    from petty_cash.services import unpublish  # it imports this module
+
     if not can_delete_report(user, report):
         raise ReportActionRefused("You are not authorized to delete this report.", 403)
+    if not may_delete(user, report):
+        raise ReportActionRefused(IN_XERO_RIGHT, 403)
+    _refuse_undeletable(report)
+    claimed, prior = unpublish.take_out_of_xero(report) if was_published(report) else (False, None)
+    try:
+        _delete(report, claimed=claimed)
+    except BaseException:
+        if claimed:
+            # its entries are out of Xero already: back as a report no longer in Xero
+            unpublish.release(report.id, prior, diverged=True)
+        raise
+
+
+def _delete(report: Report, *, claimed: bool) -> None:
     with transaction.atomic():
         locked = Report.objects.select_for_update().get(id=report.id)
-        if locked.publishing_status == PUBLISHING:
-            raise ReportActionRefused(
-                "Xero is still publishing this report. Wait until it finishes before deleting it.", 409
-            )
-        # A stale draft (dated before the last submitted day) may go though it is not the latest:
-        # nothing can finish it, and nothing after it depends on it (owner, 2026-10-26).
-        stale = is_stale_draft(locked)
-        if newer_exists(locked) and not stale:
-            raise ReportActionRefused(NEWER_DELETE, 400)
+        stale = _refuse_undeletable(locked, claimed=claimed)
 
         report_id, entity_id = locked.id, locked.entity_id
         if not stale:  # the sequence has moved on past a stale day: the report before keeps its link

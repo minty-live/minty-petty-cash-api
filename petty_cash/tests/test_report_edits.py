@@ -10,7 +10,7 @@ from datetime import timedelta
 
 import pytest
 from django.test.client import BOUNDARY, MULTIPART_CONTENT, encode_multipart
-from minty_db.enums import SystemRole
+from minty_db.enums import EntityRole, SystemRole
 from minty_db.models import (
     AccountInfo,
     Attachment,
@@ -18,6 +18,7 @@ from minty_db.models import (
     Report,
     ReportExpense,
     ReportExpenseAttachment,
+    UserEntity,
     XeroContactSync,
 )
 
@@ -33,9 +34,11 @@ OLD_KEY = "expenses/x/OLD_RECEIPT.png"
 @pytest.fixture
 def day(client, shop, notes, lists, s3):  # noqa: F811
     """A submitted day whose one line is Advertising (acc-0001), ABC Supplies (con-0001), 15,
-    "Flyers", with one receipt in the bucket."""
+    "Flyers", with one receipt in the bucket - and the next day started, so it is not the latest
+    report (whose own edit is Edit Report, owner 2026-11-17)."""
     report = _ready(shop, notes)
     assert _submit(client, shop).status_code == 200
+    make_report(shop.entity, D3 + timedelta(days=1), status="draft", created_by=shop.owner.id)
     line = ReportExpense.objects.get(report_id=report.id)
     ReportExpense.objects.filter(id=line.id).update(
         description="Flyers", account_id=AccountInfo.objects.get(xero_account_id="acc-0001").id,
@@ -139,6 +142,42 @@ def test_fixed_a_draft_or_a_report_being_published_keeps_its_details(client, sho
         assert resp.status_code == 409 and resp.json() == {"error": message}
     assert _row(report).discrepancy_reason == "old" and _line(line).description == "Flyers"
     assert set(s3.objects) == {OLD_KEY}  # nothing uploaded for a refused edit
+
+
+def test_the_latest_report_s_details_are_refused_it_has_edit_report(client, shop, day, s3):  # noqa: F811
+    report, line = day
+    Report.objects.filter(entity_id=shop.entity.id, transaction_date__gt=report.transaction_date).delete()
+    _set(report, discrepancy_reason="old")
+
+    body = _get(client, shop, report.id).json()
+    assert body["permissions"]["edit"] is True
+    assert body["permissions"]["edit_details"] is False and body["options"] is None
+    for resp in (_reason(client, shop, report.id, "new"), _withdrawal(client, shop, report.id, "company"),
+                 _edit_line(client, shop, report.id, line.id, description="Posters", receipt=_file("new.png", PNG))):
+        assert resp.status_code == 409
+        assert resp.json() == {"error": "This is the latest report. Use Edit Report to change it."}
+    assert _row(report).discrepancy_reason == "old" and _line(line).description == "Flyers"
+    assert set(s3.objects) == {OLD_KEY}
+
+
+def test_a_cashier_edits_the_details_only_of_a_report_they_created(client, shop, day):
+    """Owner, 2026-11-17: a cashier edits only their own reports; a shop manager anyone's."""
+    report, _ = day  # the owner's
+    cashier, manager = make_user("cashier@test.com"), make_user("manager@test.com")
+    UserEntity.objects.create(user_id=cashier.id, entity_id=shop.entity.id, role=EntityRole.CASHIER, approved=True)
+    UserEntity.objects.create(user_id=manager.id, entity_id=shop.entity.id, role=EntityRole.SHOP_MANAGER,
+                              approved=True)
+
+    assert _get(client, shop, report.id, user=cashier).json()["permissions"]["edit_details"] is False
+    refused = _reason(client, shop, report.id, "cashier", user=cashier)
+    assert refused.status_code == 403
+    assert refused.json() == {"error": "It looks like you don't have permission to edit this report."}
+    assert _reason(client, shop, report.id, "manager", user=manager).status_code == 200
+
+    _set(report, created_by=cashier.id)
+    assert _get(client, shop, report.id, user=cashier).json()["permissions"]["edit_details"] is True
+    assert _reason(client, shop, report.id, "mine", user=cashier).status_code == 200
+    assert _row(report).discrepancy_reason == "mine"
 
 
 def test_someone_without_the_right_is_refused(client, shop, day):

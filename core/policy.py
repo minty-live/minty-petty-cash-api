@@ -38,6 +38,7 @@ let a superuser browsing a customer's half-finished onboarding change it.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from minty_db.enums import SystemRole
@@ -234,6 +235,20 @@ def _report_rule(user: Any, report: Any, own: Permission, entity: Permission) ->
 
 def can_edit_report(user: Any, report: Any) -> bool:
     return _report_rule(user, report, Permission.REPORT_EDIT_OWN, Permission.REPORT_EDIT_ENTITY)
+
+
+def report_edit_rule(user: Any, entity_id: str) -> Callable[[Any], bool]:
+    """``can_edit_report`` for many reports of one company (report history's rows): the two rights
+    read once. A cashier edits only the reports they created (owner, 2026-11-17)."""
+    own = has_permission(user, Permission.REPORT_EDIT_OWN, entity_id)
+    anyone = has_permission(user, Permission.REPORT_EDIT_ENTITY, entity_id)
+    me = str(getattr(user, "id", ""))
+
+    def may(report: Any) -> bool:
+        creator = getattr(report, "created_by", None)
+        return anyone or (own and bool(creator) and str(creator) == me)
+
+    return may
 
 
 def can_view_report(user: Any, report: Any) -> bool:
