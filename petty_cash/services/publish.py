@@ -77,6 +77,9 @@ STALE_ACCOUNT = ("{name} ({code}) isn't matched to your Xero organisation. Match
                  "Integration, then publish again.")
 ARCHIVED_ACCOUNT = ("{name} ({code}) is archived in Xero. Restore it in Xero or choose another account, "
                     "then publish again.")
+#: A Petty Cash contact the day needs that Xero archived (2026-11-17): every publish of that step fails.
+ARCHIVED_CONTACT = ("{name}, your {label}, is archived in Xero. Restore it in Xero or choose another in Settings, "
+                    "under Petty Cash Settings, then publish again.")
 #: Finish set ``entities.xero_publish_from`` (owner: only records from then on go to Xero).
 BEFORE_XERO = "This report is from before Xero was connected, so it stays in Minty."
 CONNECTIONS_URL = "https://api.xero.com/connections"
@@ -114,9 +117,27 @@ def stale_matches(entity: Entity, report: Report) -> list[str]:
             out.append(STALE_ACCOUNT.format(**named))
         elif copies and copies[account.xero_account_id] != "ACTIVE":
             out.append(ARCHIVED_ACCOUNT.format(**named))
+    if row is not None:
+        out += _archived_contacts(row, report)
     if out:
         logger.info("Publish: report %s refused - %s stale match(es) for organisation %s", report.id, len(out), org)
     return out
+
+
+def _archived_contacts(row: EntityPettycashSettings, report: Report) -> list[str]:
+    """The Petty Cash contacts THIS day sends to Xero that the sync found archived (``record_status``),
+    one sentence each, by the name Settings gives the field. Only the steps with an amount use one:
+    cash sales, a personal withdrawal, a counted difference."""
+    needed = []
+    if report.cashsale_total and report.cashsale_total > 0:
+        needed.append((row.cash_sale_contact_id, "Cash Sales contact"))
+    if report.cash_addition and report.cash_addition > 0 and report.cash_addition_type != "company":
+        needed.append((row.director_contact_id, "Director / Responsible person"))
+    if report.discrepancy_amount and report.discrepancy_type in ("over", "short"):
+        needed.append((row.discrepancy_contact_id, "Discrepancy contact"))
+    archived = dict(XeroContactSync.objects.filter(id__in=[cid for cid, _ in needed if cid],
+                                                   record_status="archived").values_list("id", "name"))
+    return [ARCHIVED_CONTACT.format(name=archived[cid], label=label) for cid, label in needed if cid in archived]
 
 
 def sync_connection_status(entity: Entity, access_token: str) -> None:

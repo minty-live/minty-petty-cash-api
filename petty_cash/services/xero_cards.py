@@ -128,7 +128,8 @@ def _account(row: AccountInfo) -> dict:
 
 
 def _contact(row: XeroContactSync) -> dict:
-    return {"ContactID": row.xero_contact_id, "Name": row.name}
+    # archived by the sync (Xero archived it): a publish to it fails (2026-11-17)
+    return {"ContactID": row.xero_contact_id, "Name": row.name, "archived": row.record_status == "archived"}
 
 
 def choices(entity_id) -> dict:
@@ -136,7 +137,9 @@ def choices(entity_id) -> dict:
     choice, which is always among its list's options (Flask's ``build_xero_mapping_form_context``)."""
     accounts = [_account(a) for a in AccountInfo.objects.filter(entity_id=entity_id, status="ACTIVE")]
     lists = {name: [a for a in accounts if keep(a["Type"])] for name, keep in _LISTS.items()}
-    lists["contacts"] = [_contact(c) for c in XeroContactSync.objects.filter(entity_id=entity_id)]
+    # an archived contact is offered only as the saved choice (added below), marked
+    lists["contacts"] = [_contact(c) for c in XeroContactSync.objects.filter(entity_id=entity_id)
+                         .exclude(record_status="archived")]
     row = EntityPettycashSettings.objects.filter(entity_id=entity_id).first()
     saved = {}
     for key, _label, kind, listed, column in FIELDS:
@@ -166,7 +169,7 @@ def read(entity_id) -> list[dict]:
                          **({} if kind == "contact" else {"code": o.get("Code") or ""})}
                         for o in found["lists"][listed] if o.get(id_key)],
             "selected": (found["saved"][key] or {}).get(id_key),
-            **({} if kind == "contact" else {"archived": bool((found["saved"][key] or {}).get("archived"))}),
+            "archived": bool((found["saved"][key] or {}).get("archived")),
         })
     return fields
 
@@ -301,21 +304,29 @@ def minty_read(entity_id) -> list[dict]:
         chosen = getattr(row, column, None) if row is not None else None
         offered = options[listed]
         archived = False
-        if kind == "account" and chosen and not any(o["row"] == chosen for o in offered):
-            # A saved account no longer active stays shown, marked, rather than reading as unchosen.
-            saved = AccountInfo.objects.filter(id=chosen, entity_id=entity_id).first()
-            if saved is not None:
-                from petty_cash.services.expenses import public_id
+        if chosen and not any(o["row"] == chosen for o in offered):
+            # A saved account no longer active, or a saved contact archived (2026-11-17), stays shown,
+            # marked, rather than reading as unchosen.
+            from petty_cash.services.expenses import public_id
 
-                offered = [*offered, {"id": public_id(saved), "name": saved.name, "code": saved.xero_code or "",
-                                      "row": saved.id}]
-                archived = _archived(saved)
+            if kind == "account":
+                saved = AccountInfo.objects.filter(id=chosen, entity_id=entity_id).first()
+                if saved is not None:
+                    offered = [*offered, {"id": public_id(saved), "name": saved.name,
+                                          "code": saved.xero_code or "", "row": saved.id}]
+                    archived = _archived(saved)
+            else:
+                saved = XeroContactSync.objects.filter(id=chosen, entity_id=entity_id).first()
+                if saved is not None:
+                    offered = [*offered, {"id": public_id(saved), "name": saved.name, "row": saved.id}]
+                    archived = saved.record_status == "archived"
         fields.append({
             "key": key, "label": label, "kind": kind,
             "options": [{"id": o["id"], "name": o["name"], **({"code": o["code"]} if kind == "account" else {})}
                         for o in offered],
             "selected": next((o["id"] for o in offered if o["row"] == chosen), None),
-            **({"optional": True} if kind == "contact" else {"archived": archived}),
+            "archived": archived,
+            **({"optional": True} if kind == "contact" else {}),
         })
     return fields
 

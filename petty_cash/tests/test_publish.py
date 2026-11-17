@@ -656,6 +656,41 @@ def test_an_account_archived_in_xero_is_refused_by_name(client, mapped, xero, th
                                     "account, then publish again."}
 
 
+def test_a_contact_the_day_needs_archived_in_xero_is_refused_by_name(client, mapped, xero, threads):
+    """2026-11-17: Company of Friends' cash sale contact was archived in Xero; the publish started,
+    and the cash sales failed as "account is archived". Now nothing is sent and the contact is named."""
+    report, *_ = _full_day(mapped)  # cash sales, a company withdrawal and a short count
+    XeroContactSync.objects.filter(entity_id=mapped.entity.id, xero_contact_id="con-cash").update(
+        record_status="archived")
+
+    resp = _publish(client, mapped, report.id)
+
+    assert resp.status_code == 409
+    assert resp.json() == {"error": "Cash Sale, your Cash Sales contact, is archived in Xero. Restore it in Xero "
+                                    "or choose another in Settings, under Petty Cash Settings, then publish again."}
+    assert threads == [] and Report.objects.get(id=report.id).publishing_status != "publishing"
+
+
+def test_an_archived_contact_the_day_does_not_need_holds_nothing(client, mapped, xero, threads):
+    """The director contact is used only for a personal withdrawal; this day's is from the company."""
+    report, *_ = _full_day(mapped)
+    XeroContactSync.objects.filter(entity_id=mapped.entity.id, xero_contact_id="con-dir").update(
+        record_status="archived")
+    assert _publish(client, mapped, report.id).status_code == 202
+
+
+def test_xero_refusing_an_archived_contact_says_contact_not_account():
+    """The cash sales step reads Xero's refusal with "account" as its subject; Xero's own sentence
+    names the contact, and that wins (2026-11-17: it said "account is archived" for a contact)."""
+    from petty_cash.xero.errors import translate_xero_error
+
+    body = json.dumps({"Elements": [{"ValidationErrors": [
+        {"Message": "The contact '7-Eleven' is archived. Restore the contact or choose another one."}]}]})
+    assert translate_xero_error(400, body, subject="account") == "contact is archived in Xero"
+    account = json.dumps({"Elements": [{"ValidationErrors": [{"Message": "Account code '260' has been archived"}]}]})
+    assert translate_xero_error(400, account, subject="contact") == "account is archived in Xero"
+
+
 def test_a_supplier_of_an_older_organisation_is_not_refused(client, mapped, xero, threads):
     """The census (production's data, 2026-11-12): the publish re-creates a supplier Xero doesn't
     know, as it always has, so an older organisation's supplier isn't a reason to refuse."""

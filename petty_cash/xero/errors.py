@@ -219,7 +219,11 @@ def translate_xero_error(
     ):
         return XERO_HAS_PAYMENT
     if "archived" in lowered:
-        if who == "account" or "account" in lowered:
+        # Xero's own sentence names what is archived; the step's subject only breaks a tie (2026-11-17:
+        # the cash sales step, subject "account", called an archived contact an archived account)
+        if "contact" in lowered:
+            return "contact is archived in Xero"
+        if "account" in lowered or who == "account":
             return "account is archived in Xero"
         return "contact is archived in Xero"
     if "account code" in lowered or ("account" in lowered and "valid" in lowered):

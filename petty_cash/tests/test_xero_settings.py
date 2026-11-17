@@ -266,7 +266,27 @@ def test_a_saved_account_archived_in_xero_is_shown_and_marked(client, lists, xer
     assert main_bank["selected"] == "acc-pc" and main_bank["archived"] is True
     assert "acc-pc" in {o["id"] for o in main_bank["options"]}
     assert _field(body, "deposit_bank")["archived"] is False
-    assert "archived" not in _field(body, "cashsale_contact")
+    assert _field(body, "cashsale_contact")["archived"] is False
+
+
+@pytest.mark.parametrize("live", [True, False], ids=["live", "without-xero"])
+def test_a_saved_contact_archived_in_xero_is_marked_and_no_other_archived_one_is_offered(client, lists, xero, live):
+    """2026-11-17: Company of Friends' cash sale contact, archived in Xero, read as an ordinary
+    choice, and every publish of its cash sales failed on it. It stays selected, marked; a contact
+    archived and not chosen is not offered."""
+    XeroContactSync.objects.create(entity_id=lists.entity.id, xero_contact_id="con-old", name="Old Customer",
+                                   record_status="archived")
+    call(client, lists, "put", "/settings/xero/mapping", MAPPING)
+    XeroContactSync.objects.filter(xero_contact_id="con-1").update(record_status="archived")
+    xero.listed = live
+
+    body = call(client, lists, "get", "/settings/xero").json()
+
+    assert body["live"] is live
+    contact = _field(body, "cashsale_contact")
+    assert contact["selected"] and contact["archived"] is True
+    assert next(o for o in contact["options"] if o["id"] == contact["selected"])["name"] == "Cash Customer"
+    assert "Old Customer" not in {o["name"] for o in contact["options"]}
 
 
 def test_an_account_is_chosen_by_its_id_or_its_code(client, lists, xero):
