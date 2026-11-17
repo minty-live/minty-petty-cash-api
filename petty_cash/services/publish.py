@@ -106,7 +106,8 @@ def stale_matches(entity: Entity, report: Report) -> list[str]:
     row = EntityPettycashSettings.objects.filter(entity_id=entity.id).first()
     if row is not None:
         account_ids |= {row.pettycash_account_id, row.bank_account_id, row.cash_sale_account_id,
-                        row.director_account_id, row.discrepancy_account_id, row.discrepancy_bank_account_id}
+                        row.director_account_id, row.discrepancy_account_id, row.discrepancy_bank_account_id,
+                        row.electronic_sale_account_id, row.delivery_sale_account_id}
     account_ids.discard(None)
     copies = dict(XeroAccount.objects.filter(entity_id=entity.id, xero_org_id=org)
                   .values_list("xero_guid", "status"))

@@ -46,8 +46,13 @@ SYNC_SCOPE = "xero-sync"
 #: Two Xero fetches (accounts, then every page of contacts) behind accounts-api.
 SYNC_TIMEOUT = (5, 60)
 UNREACHABLE = "I couldn't reach Xero's settings just now. Try again in a moment."
-MAPPING_KEYS = ("main_bank", "deposit_bank", "cashsale_account", "cashsale_contact", "owners_account",
-                "owners_contact", "discrepancy_account", "discrepancy_contact")
+MAPPING_KEYS = ("main_bank", "deposit_bank", "cashsale_account", "electronicsale_account",
+                "deliverysale_account", "cashsale_contact", "owners_account", "owners_contact",
+                "discrepancy_account", "discrepancy_contact")
+#: The other two sales accounts' codes (owner, 2026-11-17: "each sales should be tied"), each shown only
+#: while its sales account is ticked (``sales_parts``) and optional: a sales account with no code yet is
+#: left off the day's sales invoice, as before. A hidden one keeps its stored choice.
+SALE_CODE_PART = {"electronicsale_account": "electronic", "deliverysale_account": "delivery"}
 #: Petty Cash's code list (Flask's ``COA_INCLUDED_TYPES``).
 COA_INCLUDED_TYPES = ("DIRECTCOSTS", "EXPENSE", "OVERHEADS", "PREPAYMENT")
 
@@ -56,6 +61,10 @@ FIELDS = (
     ("main_bank", "Petty Cash Account", "account", "bank_accounts", "pettycash_account_id"),
     ("deposit_bank", "Deposit Bank Account", "account", "bank_accounts", "bank_account_id"),
     ("cashsale_account", "Cash Sales account code", "account", "cashsale_account", "cash_sale_account_id"),
+    ("electronicsale_account", "Electronic Payment sales account code", "account", "cashsale_account",
+     "electronic_sale_account_id"),
+    ("deliverysale_account", "Delivery sales account code", "account", "cashsale_account",
+     "delivery_sale_account_id"),
     ("cashsale_contact", "Cash Sales contact", "contact", "contacts", "cash_sale_contact_id"),
     ("owners_account", "Director Personal Account code", "account", "owners_account", "director_account_id"),
     ("owners_contact", "Director / Responsible person", "contact", "contacts", "director_contact_id"),
@@ -238,12 +247,14 @@ def save_account_codes(entity: Entity, codes) -> str | None:
     return None
 
 
-def save_mapping(entity: Entity, values: dict, optional=()) -> list[str]:
-    """Write the nine choices onto ``entity_pettycash_settings`` (in the caller's transaction). The
+def save_mapping(entity: Entity, values: dict, optional=(), skip=()) -> list[str]:
+    """Write the choices onto ``entity_pettycash_settings`` (in the caller's transaction). The
     labels of choices that match no stored row, if any - nothing is written then. An ``optional``
-    field left empty is cleared."""
+    field left empty is cleared; a ``skip`` one (a hidden sales code) is left as it is."""
     resolved, unresolved = {}, []
     for key, label, kind, _listed, column in FIELDS:
+        if key in skip:
+            continue
         value = values.get(key)
         if not value and key in optional:
             resolved[column] = None
@@ -267,7 +278,8 @@ def save_mapping(entity: Entity, values: dict, optional=()) -> list[str]:
 
 #: The five accounts daily closing uses - the mapping's account fields, minus the discrepancy bank,
 #: which follows the petty cash account.
-MINTY_KEYS = ("main_bank", "deposit_bank", "cashsale_account", "owners_account", "discrepancy_account")
+MINTY_KEYS = ("main_bank", "deposit_bank", "cashsale_account", "electronicsale_account", "deliverysale_account",
+              "owners_account", "discrepancy_account")
 #: The three contacts, chosen without Xero too (owner, 2026-11-12: contacts are never blocked behind
 #: Xero). Optional there: an empty one leaves the stored choice as it is.
 CONTACT_KEYS = ("cashsale_contact", "owners_contact", "discrepancy_contact")
@@ -335,7 +347,8 @@ def minty_save(entity: Entity, body: dict, may_edit: bool) -> tuple[dict, int]:
     """Write the five choices (and the discrepancy bank, which follows the petty cash account)."""
     values = {key: str(body.get(key) or "").strip() for key in MINTY_KEYS}
     labels = {key: label for key, label, *_ in FIELDS}
-    optional = CASH_SALE_KEYS if banks_all_sales(entity.id) else ()
+    hidden = hidden_sale_codes(entity.id)
+    optional = (*(CASH_SALE_KEYS if banks_all_sales(entity.id) else ()), *SALE_CODE_PART)
     missing = [labels[key] for key in MINTY_KEYS if not values[key] and key not in optional]
     if missing:
         return {"error": " ".join(f"Choose the {label}." for label in missing)}, 422
@@ -354,7 +367,7 @@ def minty_save(entity: Entity, body: dict, may_edit: bool) -> tuple[dict, int]:
                 not_offered.append(label)
             resolved[column] = found
             continue
-        if key not in MINTY_KEYS:
+        if key not in MINTY_KEYS or key in hidden:
             continue
         found = next((o["row"] for o in options[listed] if o["id"] == values[key]), None)
         if found is None and not (key in optional and not values[key]):
@@ -372,12 +385,23 @@ def minty_save(entity: Entity, body: dict, may_edit: bool) -> tuple[dict, int]:
 # ---- the answer ------------------------------------------------------------------------------
 
 
+def hidden_sale_codes(entity_id) -> tuple[str, ...]:
+    """The sales codes whose sales account is not ticked: not shown, and a save leaves them alone."""
+    from petty_cash.services.sales import sales_parts
+
+    parts = sales_parts(entity_id)
+    return tuple(key for key, part in SALE_CODE_PART.items() if not parts[part])
+
+
 def _optional(entity_id, mapping: list[dict] | None) -> list[dict] | None:
-    """Each field with ``optional``: the cash-sale pair is, for a company banking all its sales."""
+    """Each field with ``optional``: the cash-sale pair is, for a company banking all its sales, and
+    the other sales accounts' codes always are. An unticked sales account's code is not shown."""
     if mapping is None:
         return None
-    skip = CASH_SALE_KEYS if banks_all_sales(entity_id) else ()
-    return [{**field, "optional": field.get("optional", False) or field["key"] in skip} for field in mapping]
+    skip = (*(CASH_SALE_KEYS if banks_all_sales(entity_id) else ()), *SALE_CODE_PART)
+    hidden = hidden_sale_codes(entity_id)
+    return [{**field, "optional": field.get("optional", False) or field["key"] in skip}
+            for field in mapping if field["key"] not in hidden]
 
 
 def payload(entity: Entity, may_edit: bool) -> dict:
@@ -442,7 +466,8 @@ def answer(entity_id, action: str, body, *, may_edit: bool) -> tuple[dict, int]:
 
     values = {key: str(body.get(key) or "").strip() for key in MAPPING_KEYS}
     labels = {key: label for key, label, *_ in FIELDS}
-    optional = CASH_SALE_KEYS if banks_all_sales(entity.id) else ()
+    hidden = hidden_sale_codes(entity.id)
+    optional = (*(CASH_SALE_KEYS if banks_all_sales(entity.id) else ()), *SALE_CODE_PART)
     missing = [labels[key] for key in MAPPING_KEYS if not values[key] and key not in optional]
     if missing:
         return {"error": " ".join(f"Choose the {label}." for label in missing)}, 422
@@ -455,7 +480,7 @@ def answer(entity_id, action: str, body, *, may_edit: bool) -> tuple[dict, int]:
         return {"error": " ".join(f"Choose the {label} from the list." for label in not_offered)}, 422
     first_save = not EntityPettycashSettings.objects.filter(entity_id=entity.id).exists()
     with transaction.atomic():
-        unresolved = save_mapping(entity, values, optional=optional)
+        unresolved = save_mapping(entity, values, optional=optional, skip=hidden)
     if unresolved:
         return {"error": "Some choices haven't synced from Xero yet: " + "; ".join(unresolved)
                          + ". Try again once the Xero sync has finished."}, 409

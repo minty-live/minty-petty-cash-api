@@ -722,3 +722,55 @@ def test_a_change_of_matches_in_progress_does_not_hold_a_publish(client, mapped,
     report, *_ = _full_day(mapped)
     assert _publish(client, mapped, report.id).status_code == 202
 
+
+
+# ---- every sales account on the day's sales invoice (owner, 2026-11-17: "each sales should be tied") ----
+
+
+def _sale(shop, report, name, kind, amount):
+    from minty_db.models import ReportSale, SaleInfo
+
+    row = SaleInfo.objects.create(sale_name=name, value_name=f"{name.lower()}_sales", type=kind, display_order=1)
+    ReportSale.objects.create(report_id=report.id, sale_id=row.id, amount=amount)
+
+
+def _sale_codes(shop):
+    def account(code, name):
+        return AccountInfo.objects.create(entity_id=shop.entity.id, xero_account_id=f"acc-{code}", xero_code=code,
+                                          name=name, type="REVENUE", status="ACTIVE").id
+
+    EntityPettycashSettings.objects.filter(entity_id=shop.entity.id).update(
+        electronic_sale_account_id=account("201", "Credit Card Sales"),
+        delivery_sale_account_id=account("202", "Online Sales"))
+
+
+def test_electronic_and_delivery_sales_are_lines_on_the_days_sales_invoice(mapped, xero):
+    _sale_codes(mapped)
+    report = _report(mapped, cashsale_total=200, nocashsale_total=80)
+    _sale(mapped, report, "Visa", "electronic", 50)
+    _sale(mapped, report, "Keeta", "delivery", 30)
+    _run(mapped, report)
+    invoice, = xero.sent("PUT", "Invoices")
+    lines = [(li["Description"], li["AccountCode"], li["LineAmount"]) for li in invoice["Invoices"][0]["LineItems"]]
+    assert lines == [(f"MT{D3:%Y%m%d}Cash Sales", "200", 200.0),
+                     (f"MT{D3:%Y%m%d}Electronic Payments", "201", 50.0),
+                     (f"MT{D3:%Y%m%d}Delivery Sales", "202", 30.0)]
+    assert invoice["Invoices"][0]["Contact"] == {"ContactID": "con-cash"}
+
+
+def test_a_sales_account_with_no_code_yet_is_left_out_as_before(mapped, xero):
+    report = _report(mapped, cashsale_total=200, nocashsale_total=50)
+    _sale(mapped, report, "Visa", "electronic", 50)
+    _run(mapped, report)
+    invoice, = xero.sent("PUT", "Invoices")
+    assert [li["AccountCode"] for li in invoice["Invoices"][0]["LineItems"]] == ["200"]
+
+
+def test_a_day_with_card_sales_and_no_cash_still_sends_its_line(mapped, xero):
+    _sale_codes(mapped)
+    report = _report(mapped, cashsale_total=0, nocashsale_total=50)
+    _sale(mapped, report, "Visa", "electronic", 50)
+    report = _run(mapped, report)
+    invoice, = xero.sent("PUT", "Invoices")
+    assert [(li["AccountCode"], li["LineAmount"]) for li in invoice["Invoices"][0]["LineItems"]] == [("201", 50.0)]
+    assert report.publishing_status == "completed"

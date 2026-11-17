@@ -84,6 +84,20 @@ Non-cash, as before. The close read, the Daily Report and Settings do not read `
 minty-db v0.11 (`requirements.txt`; the tag must be pushed). Tests:
 `test_sales.py::test_the_parts_follow_the_ticked_sales_accounts`, `test_an_unticked_part_gets_no_rows_on_save`.
 
+**Each sales account has its own code (owner, 2026-11-17: "each sales should be tied"; minty-db v0.12).**
+Account mapping (`services/xero_cards.py`) has `electronicsale_account` ("Electronic Payment sales
+account code") and `deliverysale_account` ("Delivery sales account code") after Cash Sales', from the
+same sales/revenue list: optional, shown only while that sales account is ticked (`hidden_sale_codes`;
+a save leaves a hidden one as stored), on the Xero path and for a company keeping its books in Minty.
+The publish's sales invoice (`xero/steps.py::sales_lines`) has a line per sales account with an amount:
+Cash Sales against the Cash Sales code, then Electronic Payments and Delivery Sales (the day's
+`report_sale` rows by type; a Non-cash company with no Delivery part counts delivery as Electronic)
+each against its own code - one with no code yet stays off the invoice, as before (logged). The
+invoice goes to the Cash Sales contact; its reference stays `MT<date>Cash Sales`, so an invoice
+published before keeps updating in place. `stale_matches` checks the two codes too. Tests:
+`test_xero_settings.py` (each sales account's code), `test_publish.py` (every sales account on the
+day's sales invoice).
+
 ## Stale drafts (owner, 2026-10-26)
 
 A **stale draft** is a draft dated before the company's last submitted report

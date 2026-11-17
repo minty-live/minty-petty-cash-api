@@ -127,7 +127,8 @@ def test_the_card_offers_its_own_accounts_with_no_xero_call(client, minty, monke
     assert read["minty"] is True and read["live"] is False
     fields = {f["key"]: f for f in read["mapping"]}
     # contacts too, without Xero (owner, 2026-11-12), optional: an empty one leaves the stored choice
-    assert list(fields) == ["main_bank", "deposit_bank", "cashsale_account", "cashsale_contact", "owners_account",
+    assert list(fields) == ["main_bank", "deposit_bank", "cashsale_account", "electronicsale_account", "deliverysale_account",
+                            "cashsale_contact", "owners_account",
                             "owners_contact", "discrepancy_account", "discrepancy_contact"]
     assert fields["cashsale_contact"]["kind"] == "contact" and fields["cashsale_contact"]["optional"] is True
     assert {o["name"] for o in fields["main_bank"]["options"]} == {"Petty Cash", "Bank Account"}

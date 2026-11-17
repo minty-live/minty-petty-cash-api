@@ -58,6 +58,8 @@ _ROLE_COLUMN = {
     "pettycash": "pettycash_account_id",
     "bank": "bank_account_id",
     "cash_sale": "cash_sale_account_id",
+    "electronic_sale": "electronic_sale_account_id",
+    "delivery_sale": "delivery_sale_account_id",
     "discrepancy": "discrepancy_bank_account_id",
     "discrepancy_account": "discrepancy_account_id",
     "director": "director_account_id",
@@ -89,7 +91,7 @@ def account_for_role(entity_id, role: str) -> dict | None:
         "name": account.name,
         "account_code": account.xero_code or "",
     }
-    if role not in ("director", "cash_sale", "discrepancy"):
+    if role not in ("director", "cash_sale", "electronic_sale", "delivery_sale", "discrepancy"):
         found["bank_account_number"] = mask_account_number(account.bank_account_number)
     return found
 

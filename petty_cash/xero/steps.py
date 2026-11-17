@@ -237,8 +237,44 @@ def withdrawal(run: Run, report: Report, existing) -> tuple[int, int]:
         return 0, 1
 
 
-def cash_sales(run: Run, report: Report, amount, existing) -> tuple[int, int]:
-    """The day's cash sales as one authorised sales invoice to the cash sale contact."""
+def sales_lines(entity_id, report: Report) -> list[tuple[str, object, str | None]]:
+    """The day's sales invoice lines, ``(label, amount, account code)``: Cash Sales against the Cash
+    Sales account code, then Electronic Payments and Delivery Sales each against its own (owner,
+    2026-11-17: "each sales should be tied"). Only a line with an amount; Electronic and Delivery
+    only once their code is chosen - with none yet they stay out, as before the codes existed. A
+    Non-cash company with no Delivery part counts its delivery methods as Electronic, as its report
+    does."""
+    from minty_db.models import ReportSale
+
+    from petty_cash.services.sales import sales_groups, sales_parts
+
+    lines = []
+    cash = cents(report.cashsale_total)
+    if cash > 0:
+        lines.append(("Cash Sales", cash, (account_for_role(entity_id, "cash_sale") or {}).get("account_code")))
+    parts = sales_parts(entity_id)
+    folded = sales_groups(entity_id) == "non_cash" and not parts["delivery"]
+    totals = {"electronic": cents(0), "delivery": cents(0)}
+    for kind, amount in ReportSale.objects.filter(report_id=report.id).values_list("sale__type", "amount"):
+        kind = str(kind)
+        if kind == "delivery" and folded:
+            kind = "electronic"
+        if kind in totals:
+            totals[kind] += cents(amount)
+    for kind, label, role in (("electronic", "Electronic Payments", "electronic_sale"),
+                              ("delivery", "Delivery Sales", "delivery_sale")):
+        code = (account_for_role(entity_id, role) or {}).get("account_code")
+        if totals[kind] > 0 and code:
+            lines.append((label, totals[kind], code))
+        elif totals[kind] > 0:
+            logger.info("Publish: report %s has %s %s with no account code chosen - left off the invoice",
+                        report.id, totals[kind], label)
+    return lines
+
+
+def cash_sales(run: Run, report: Report, lines, existing) -> tuple[int, int]:
+    """The day's sales as one authorised sales invoice to the cash sale contact, a line per sales
+    account (``sales_lines``)."""
     meta = {"scope": "entity", "deps": DEPS_CASH_SALES, "module": "invoices"}
     try:
         contact = contact_for_role(run.entity.id, "cashsale_contact")
@@ -246,13 +282,15 @@ def cash_sales(run: Run, report: Report, amount, existing) -> tuple[int, int]:
             run.pfr.add_missing(pub_err.LABEL_CASHSALE_CONTACT, deps=[["contact", "cashsale_contact"]],
                                 module="invoices")
             return 0, 1
-        code = (account_for_role(run.entity.id, "cash_sale") or {}).get("account_code")
         day = report.transaction_date
-        description = f"MT{day.strftime('%Y%m%d')}Cash Sales"
+        stamp = f"MT{day.strftime('%Y%m%d')}"
+        # the reference stays the cash sales one: an invoice published before the other lines keeps it
+        description = f"{stamp}Cash Sales"
         payload = {"Invoices": [{
             "Type": "ACCREC", "Contact": {"ContactID": contact.xero_contact_id},
-            "LineItems": [{"Description": description, "Quantity": 1, "UnitAmount": _amount(amount),
-                           "AccountCode": code, "TaxType": "NONE", "LineAmount": _amount(amount)}],
+            "LineItems": [{"Description": f"{stamp}{label}", "Quantity": 1, "UnitAmount": _amount(amount),
+                           "AccountCode": code, "TaxType": "NONE", "LineAmount": _amount(amount)}
+                          for label, amount, code in lines],
             "Date": day.isoformat(), "DueDate": day.isoformat(), "Reference": description, "Status": "AUTHORISED",
         }]}
         existing_id = _existing_id(existing, "INVOICE")
@@ -494,11 +532,12 @@ def publish_report(run: Run, report: Report, retry_filter: dict | None = None) -
             totals["failed"] += bad
             modules[key] = {"status": "error" if bad else "success"}
 
+        lines = sales_lines(run.entity.id, report)
         steps = (
             ("withdrawal_from", cents(report.cash_addition) > 0,
              lambda: withdrawal(run, report, publish_record.recorded_entry(record, "withdrawal_from"))),
-            ("invoices", cents(report.cashsale_total) > 0,
-             lambda: cash_sales(run, report, report.cashsale_total, publish_record.recorded_entry(record, "invoices"))),
+            ("invoices", bool(lines),
+             lambda: cash_sales(run, report, lines, publish_record.recorded_entry(record, "invoices"))),
             ("expenses", cents(report.expense_total) > 0,
              lambda: expenses(run, report, publish_record.recorded_expense_ids(record), retry_lines)),
             ("deposit", cents(report.bank_deposit) > 0,

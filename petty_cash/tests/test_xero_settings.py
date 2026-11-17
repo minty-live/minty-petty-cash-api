@@ -32,6 +32,8 @@ from petty_cash.tests.test_settings import call, member
 pytestmark = pytest.mark.django_db
 ORG = "org-1"
 MAPPING = {"main_bank": "acc-pc", "deposit_bank": "acc-dep", "cashsale_account": "acc-sales",
+           # the other two sales accounts' codes (owner, 2026-11-17), optional
+           "electronicsale_account": "acc-sales", "deliverysale_account": "acc-sales",
            "cashsale_contact": "con-1", "owners_account": "acc-owner", "owners_contact": "con-1",
            "discrepancy_account": "acc-adv", "discrepancy_contact": "con-1"}
 NO_RIGHT = "You don't have permission to change these settings. Ask an Accountant or an Admin."
@@ -130,7 +132,7 @@ def test_without_a_live_connection_the_accounts_codes_and_contacts_all_stay(clie
     body = call(client, lists, "get", "/settings/xero").json()
     assert body["live"] is False and xero.syncs == []
     assert [f["key"] for f in body["mapping"]] == [
-        "main_bank", "deposit_bank", "cashsale_account", "cashsale_contact", "owners_account", "owners_contact",
+        "main_bank", "deposit_bank", "cashsale_account", "electronicsale_account", "deliverysale_account", "cashsale_contact", "owners_account", "owners_contact",
         "discrepancy_account", "discrepancy_contact"]
     assert {o["id"] for o in _field(body, "main_bank")["options"]} >= {"acc-pc", "acc-dep"}
     assert body["account_codes"] == [{"code": "400", "name": "Advertising", "selected": True},
@@ -315,7 +317,8 @@ def test_a_xero_company_banking_all_its_sales_needs_no_cash_sale_account_or_cont
 
     Entity.objects.filter(id=lists.entity.id).update(uses_sales_cash=False)
     read = call(client, lists, "get", "/settings/xero").json()
-    assert {f["key"] for f in read["mapping"] if f["optional"]} == {"cashsale_account", "cashsale_contact"}
+    assert {f["key"] for f in read["mapping"] if f["optional"]} == {
+        "cashsale_account", "cashsale_contact", "electronicsale_account", "deliverysale_account"}
     resp = call(client, lists, "put", "/settings/xero/mapping",
                 {**MAPPING, "cashsale_account": "", "cashsale_contact": ""})
     assert resp.status_code == 200, resp.json()
@@ -323,3 +326,32 @@ def test_a_xero_company_banking_all_its_sales_needs_no_cash_sale_account_or_cont
     assert (saved.cash_sale_account_id, saved.cash_sale_contact_id) == (None, None)
     missing = missing_slots(lists.entity.id)
     assert "Cash Sale Account" not in missing and "Cash Sale Contact" not in missing
+
+
+# ---- one account code per sales account (owner, 2026-11-17: "each sales should be tied") --------
+
+
+def test_each_ticked_sales_account_has_its_own_optional_code(client, lists, xero):
+    body = call(client, lists, "get", "/settings/xero").json()
+    for key, label in (("electronicsale_account", "Electronic Payment sales account code"),
+                       ("deliverysale_account", "Delivery sales account code")):
+        field = _field(body, key)
+        assert (field["label"], field["optional"]) == (label, True)
+        assert {o["id"] for o in field["options"]} == {"acc-sales"}  # the sales list, as Cash Sales'
+    resp = call(client, lists, "put", "/settings/xero/mapping",
+                {**MAPPING, "electronicsale_account": "200", "deliverysale_account": ""})
+    assert resp.status_code == 200, resp.json()
+    saved = EntityPettycashSettings.objects.get(entity_id=lists.entity.id)
+    assert AccountInfo.objects.get(id=saved.electronic_sale_account_id).xero_account_id == "acc-sales"
+    assert saved.delivery_sale_account_id is None
+
+
+def test_an_unticked_sales_account_hides_its_code_and_keeps_it(client, lists, xero):
+    call(client, lists, "put", "/settings/xero/mapping", MAPPING)
+    Entity.objects.filter(id=lists.entity.id).update(sells_delivery=False)
+    body = call(client, lists, "get", "/settings/xero").json()
+    assert "deliverysale_account" not in {f["key"] for f in body["mapping"]}
+    sent = {k: v for k, v in MAPPING.items() if k != "deliverysale_account"}
+    assert call(client, lists, "put", "/settings/xero/mapping", sent).status_code == 200
+    saved = EntityPettycashSettings.objects.get(entity_id=lists.entity.id)
+    assert saved.delivery_sale_account_id is not None, "a hidden code is kept for when it comes back"
