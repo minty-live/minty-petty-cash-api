@@ -28,7 +28,7 @@ from core.exceptions import Refused
 from core.policy import Permission, has_permission
 from petty_cash.routes._input import json_body
 from petty_cash.services import xero_cards
-from petty_cash.services.sales import sales_groups
+from petty_cash.services.sales import sales_groups, sales_parts, set_sales_parts
 from petty_cash.services.settings import (
     TYPES,
     SettingsRefused,
@@ -90,6 +90,8 @@ def settings_payload(request) -> dict:
         "available": available(entity_id) if may_view_sales else {t: [] for t in TYPES},
         # one Non-cash card, or Electronic and Delivery (owner, 2026-11-11)
         "sales_groups": sales_groups(entity_id),
+        # the three sales accounts on or off (owner, 2026-11-17): which parts the daily report asks for
+        "sales_parts": sales_parts(entity_id),
         # a disconnect keeps the organisation (Xero optional, 2026-11-10): the status says connected
         "xero_connected": bool(org.xero_org_id) and org.status != "disconnected",
         "permissions": {
@@ -99,6 +101,7 @@ def settings_payload(request) -> dict:
             "rename_sales_method": _may(request, "SALES_METHOD_UPDATE"),
             "remove_sales_method": _may(request, "SALES_METHOD_DELETE"),
             "reorder_sales_methods": _may(request, "SALES_METHOD_REORDER"),
+            "edit_sales_accounts": _may(request, "SALES_METHOD_UPDATE"),
         },
     }
 
@@ -146,6 +149,26 @@ def save_xero_account_codes(request):
 def _xero(request, action: str, body):
     answer, status = xero_cards.answer(request.company.id, action, body, may_edit=_may(request, *XERO_RIGHTS))
     return JsonResponse(answer, status=status)
+
+
+NO_SALES_ACCOUNT = "No sales account is ticked yet. Tick at least one to continue."
+
+
+@router.put("/settings/sales-accounts")
+def save_sales_accounts(request):
+    """``{cash, electronic, delivery}`` - Sales - Cash, Electronic Payment and Delivery on or off
+    (owner, 2026-11-17; Figma 464:73 row 4). At least one stays on. Turning one off keeps its methods:
+    the daily report stops asking for that part, and they come back when it is turned on again."""
+    if not _may(request, "SALES_METHOD_UPDATE"):
+        raise Refused(NO_RIGHT, 403)
+    data = _body(request)
+    ticks = [data.get(k) for k in ("cash", "electronic", "delivery")]
+    if not all(isinstance(t, bool) for t in ticks):
+        raise Refused("Turn each sales account on or off to continue.", 422)
+    if not any(ticks):
+        raise Refused(NO_SALES_ACCOUNT, 422)
+    set_sales_parts(request.company.id, *ticks)
+    return _answer(request, "Your sales accounts are saved.")
 
 
 @router.post("/sales-methods")

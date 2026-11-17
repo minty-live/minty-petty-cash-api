@@ -142,7 +142,7 @@ def remove_method(entity_id, method_id) -> str:
     links = EntitySaleSetting.objects.filter(entity_id=entity_id, sale_id=sale.id)
     if sale.entity_id is None:
         links.update(is_active=False)
-        return f"{sale.sale_name} is off your list. Add it back any time from Add New Method."
+        return f"{sale.sale_name} is off your list. You can add it back any time."
     if ReportSale.objects.filter(sale_id=sale.id).exists():
         links.update(is_active=False)
         SaleInfo.objects.filter(id=sale.id).update(enabled=False)

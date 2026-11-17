@@ -229,3 +229,37 @@ def test_the_lists_follow_the_business_type(client, shop, methods, business, gro
 
     assert sales_groups(shop.entity.id) == groups
     assert _get(client, shop).json()["groups"] == groups
+
+
+# --- the parts follow onboarding's sales accounts (owner, 2026-11-17; Figma 464:73 row 3) ------------
+
+
+@pytest.mark.parametrize("business, cash, electronic, delivery, parts", [
+    ("fnb", True, None, None, {"cash": True, "electronic": True, "delivery": True}),
+    (None, None, None, None, {"cash": True, "electronic": True, "delivery": True}),
+    ("retail", True, None, None, {"cash": True, "electronic": True, "delivery": False}),
+    ("fnb", True, True, False, {"cash": True, "electronic": True, "delivery": False}),
+    ("fnb", True, False, False, {"cash": True, "electronic": False, "delivery": False}),
+    ("fnb", False, True, True, {"cash": False, "electronic": True, "delivery": True}),
+    ("retail", True, True, True, {"cash": True, "electronic": True, "delivery": True}),
+])
+def test_the_parts_follow_the_ticked_sales_accounts(client, shop, methods, business, cash, electronic, delivery,
+                                                     parts):
+    """Sales - Cash is the cash answer (NULL = yes); Electronic Payment and Delivery are the company's
+    ticks (minty-db v0.11), NULL = the business type picks: Restaurant & Food and no type both, a
+    retail shop, a service or a general business Electronic only. The page shows only those parts."""
+    Entity.objects.filter(id=shop.entity.id).update(business_type=business, uses_sales_cash=cash,
+                                                    sells_electronic=electronic, sells_delivery=delivery)
+    _draft(shop)
+    assert _get(client, shop).json()["parts"] == parts
+
+
+def test_an_unticked_part_gets_no_rows_on_save(client, shop, methods):
+    """A part the page does not show sends nothing; its methods keep no row for the day."""
+    Entity.objects.filter(id=shop.entity.id).update(business_type="fnb", sells_electronic=True, sells_delivery=False)
+    draft = _draft(shop)
+    resp = _put(client, shop, _body(cash_sales=10, amounts={"visa_sales": 5}))
+    assert resp.status_code == 200, resp.content
+    assert "foodpanda_sales" not in {m["value_name"] for m in _get(client, shop).json()["methods"]}
+    delivery = {methods[v].id for v in ("foodpanda_sales", "keeta_sales", "openrice_sales")}
+    assert not ReportSale.objects.filter(report_id=draft.id, sale_id__in=delivery).exists()

@@ -930,6 +930,27 @@
         ]
       }
     },
+    "/api/petty-cash/v1/companies/{entity_id}/settings/sales-accounts": {
+      "put": {
+        "description": "``{cash, electronic, delivery}`` - Sales - Cash, Electronic Payment and Delivery on or off\n(owner, 2026-11-17; Figma 464:73 row 4). At least one stays on. Turning one off keeps its methods:\nthe daily report stops asking for that part, and they come back when it is turned on again.",
+        "operationId": "petty_cash_routes_settings_save_sales_accounts",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "PettyCashBearerAuth": []
+          }
+        ],
+        "summary": "Save Sales Accounts",
+        "tags": [
+          "Settings"
+        ]
+      }
+    },
     "/api/petty-cash/v1/companies/{entity_id}/settings/xero": {
       "get": {
         "operationId": "petty_cash_routes_settings_xero_settings",

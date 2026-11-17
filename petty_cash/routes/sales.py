@@ -23,7 +23,13 @@ from petty_cash.routes._input import (
     require_edit,
 )
 from petty_cash.services.reports import currency_code, draft_payload, find_draft, progress_payload
-from petty_cash.services.sales import CASH_VALUE_NAME, page_methods, sales_groups, save_sales
+from petty_cash.services.sales import (
+    CASH_VALUE_NAME,
+    page_methods,
+    sales_groups,
+    sales_parts,
+    save_sales,
+)
 
 router = Router()
 NO_DRAFT = "I don't see a draft yet - let's start with the opening entry."
@@ -51,6 +57,8 @@ def sales_payload(entity_id, day) -> dict:
         ],
         "cash_sales": _cash(draft, methods),
         "groups": sales_groups(entity_id),
+        # The parts the page shows - onboarding's ticked sales accounts (owner, 2026-11-17).
+        "parts": sales_parts(entity_id),
     }
 
 

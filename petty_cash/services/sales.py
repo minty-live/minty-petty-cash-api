@@ -37,6 +37,44 @@ def sales_groups(entity_id) -> str:
     return "non_cash" if business in NON_CASH_BUSINESSES else "electronic_delivery"
 
 
+def sales_parts(entity_id) -> dict:
+    """Which of the page's three parts the company takes - onboarding's sales accounts (owner,
+    2026-11-17; Figma 464:73 row 3). Cash Sales is the cash answer (NULL counts as yes); Electronic
+    Payments and Delivery Sales are the company's ticks (minty-db v0.11), NULL until chosen, when the
+    business type picks: Restaurant & Food and no type both, a retail shop, a service or a general
+    business Electronic (its Non-cash list) only. minty-onboarding-api's ``sales_ticks`` says the same."""
+    row = (
+        Entity.objects.filter(id=entity_id)
+        .values("business_type", "uses_sales_cash", "sells_electronic", "sells_delivery")
+        .first()
+        or {}
+    )
+    electronic, delivery = row.get("sells_electronic"), row.get("sells_delivery")
+    return {
+        "cash": row.get("uses_sales_cash") is not False,
+        "electronic": True if electronic is None else electronic,
+        "delivery": (row.get("business_type") not in NON_CASH_BUSINESSES) if delivery is None else delivery,
+    }
+
+
+@transaction.atomic
+def set_sales_parts(entity_id, cash: bool, electronic: bool, delivery: bool) -> None:
+    """Settings' sales accounts (owner, 2026-11-17). Cash is the cash answer, so the company's Cash
+    method follows it, as onboarding's 4.2 does (linked when it has none); the methods of a part that
+    is off stay as they are, so turning it on again brings them back."""
+    Entity.objects.filter(id=entity_id).update(
+        uses_sales_cash=cash, sells_electronic=electronic, sells_delivery=delivery
+    )
+    changed = EntitySaleSetting.objects.filter(entity_id=entity_id, sale__value_name=CASH_VALUE_NAME).update(
+        is_active=cash
+    )
+    if cash and not changed:
+        row = SaleInfo.objects.filter(value_name=CASH_VALUE_NAME, entity_id__isnull=True).first()
+        if row is None:
+            raise RuntimeError("Minty's Cash sales method is missing from sale_info")
+        EntitySaleSetting.objects.create(entity_id=entity_id, sale_id=row.id, is_active=True, display_order=0)
+
+
 def sales_methods(entity_id) -> list[dict]:
     """The company's enabled methods in Settings order (``display_order``, then name), each with
     its catalogue row's ``sale_name`` / ``value_name`` / ``type``."""
@@ -59,9 +97,19 @@ def sales_methods(entity_id) -> list[dict]:
     return methods
 
 
-def shown(method: dict) -> bool:
-    """The page has a field for the electronic and delivery methods, and for Cash."""
-    return method["type"] in (SaleType.ELECTRONIC, SaleType.DELIVERY) or method["value_name"] == CASH_VALUE_NAME
+def shown(method: dict, parts: dict | None = None) -> bool:
+    """The page has a field for the electronic and delivery methods, and for Cash - each only while
+    its part is on (``sales_parts``). A Non-cash list with no Delivery part keeps any delivery method
+    in it, as before."""
+    if parts is None:
+        parts = {"cash": True, "electronic": True, "delivery": True}
+    if method["value_name"] == CASH_VALUE_NAME:
+        return parts["cash"]
+    if method["type"] == SaleType.ELECTRONIC:
+        return parts["electronic"]
+    if method["type"] == SaleType.DELIVERY:
+        return parts["delivery"] or (parts["electronic"] and method.get("non_cash", False))
+    return False
 
 
 def page_methods(entity_id, report_id=None) -> list[dict]:
@@ -69,6 +117,7 @@ def page_methods(entity_id, report_id=None) -> list[dict]:
     amounts = {}
     if report_id is not None:
         amounts = dict(ReportSale.objects.filter(report_id=report_id).values_list("sale_id", "amount"))
+    parts, non_cash = sales_parts(entity_id), sales_groups(entity_id) == "non_cash"
     return [
         {
             "sale_id": str(m["sale_id"]),
@@ -78,7 +127,7 @@ def page_methods(entity_id, report_id=None) -> list[dict]:
             "amount": amounts.get(m["sale_id"]),
         }
         for m in sales_methods(entity_id)
-        if m["value_name"] and shown(m)
+        if m["value_name"] and shown({**m, "non_cash": non_cash}, parts)
     ]
 
 
@@ -121,9 +170,10 @@ def save_sales(entity_id, user, draft: Report, amounts: dict, action_type: str) 
     draft.cashsale_total = cash
 
     shop_total, delivery_total = cash, Decimal("0.00")
+    parts, non_cash = sales_parts(entity_id), sales_groups(entity_id) == "non_cash"
     for method in sales_methods(entity_id):
         field = method["value_name"]
-        if not field or field == SKIPPED or not shown(method):
+        if not field or field == SKIPPED or not shown({**method, "non_cash": non_cash}, parts):
             continue
         amount = cents(amounts.get(field) or 0)
         if field != CASH_VALUE_NAME:

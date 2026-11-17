@@ -227,7 +227,7 @@ def test_renaming_removing_and_ordering(client, shop, methods):
     # Minty's method only comes off the company's list: offered again, the link kept
     removed = call(client, shop, "delete", f"/sales-methods/{visa}")
     assert removed.status_code == 200 and names(removed.json(), "electronic") == ["AlipayHK"]
-    assert removed.json()["message"] == "Visa is off your list. Add it back any time from Add New Method."
+    assert removed.json()["message"] == "Visa is off your list. You can add it back any time."
     assert visa in [m["id"] for m in removed.json()["available"]["electronic"]]
     assert EntitySaleSetting.objects.get(entity_id=shop.entity.id, sale_id=visa).is_active is False  # the link stays
 
@@ -280,3 +280,62 @@ def test_a_cashier_may_not_change_the_methods(client, shop, methods):
     assert call(client, shop, "post", "/sales-methods", {"type": "electronic", "name": "Octopus"},
                 user=person).status_code == 403
     assert call(client, shop, "delete", f"/sales-methods/{methods['Visa']}", user=person).status_code == 403
+
+
+# --- the sales accounts (owner, 2026-11-17; Figma 464:73 row 4) ---------------------------------------
+# Under the account codes: Sales - Cash, Electronic Payment, Delivery on or off. Cash is the cash answer;
+# the other two are entities.sells_electronic / sells_delivery. Turning one off keeps its methods (they
+# come back when it is turned on again); the daily report just stops asking for that part.
+
+
+def _accounts(client, shop, cash, electronic, delivery, user=None):
+    return call(client, shop, "put", "/settings/sales-accounts",
+                {"cash": cash, "electronic": electronic, "delivery": delivery}, user=user)
+
+
+def test_the_read_carries_the_sales_accounts(client, shop, methods):
+    Entity.objects.filter(id=shop.entity.id).update(business_type="retail", uses_sales_cash=True)
+    body = call(client, shop, "get", "/settings").json()
+    assert body["sales_parts"] == {"cash": True, "electronic": True, "delivery": False}
+    assert body["permissions"]["edit_sales_accounts"] is True
+
+
+def test_saving_the_sales_accounts_keeps_the_methods(client, shop, methods):
+    # every company is linked to Minty's Cash method when it is made (onboarding's entity_create)
+    cash = SaleInfo.objects.create(sale_name="Cash", value_name="cash_sales", type=SaleType.OTHER, display_order=0)
+    EntitySaleSetting.objects.create(entity_id=shop.entity.id, sale_id=cash.id, is_active=True, display_order=0)
+    resp = _accounts(client, shop, False, True, False)
+    assert resp.status_code == 200, resp.json()
+    body = resp.json()
+    assert body["sales_parts"] == {"cash": False, "electronic": True, "delivery": False}
+    assert body["message"] == "Your sales accounts are saved."
+    assert names(body, "delivery") == ["Foodpanda"], "turning Delivery off keeps its methods"
+    shop.entity.refresh_from_db()
+    assert (shop.entity.uses_sales_cash, shop.entity.sells_electronic, shop.entity.sells_delivery) == (
+        False, True, False)
+
+    assert EntitySaleSetting.objects.get(entity_id=shop.entity.id, sale_id=cash.id).is_active is False
+    assert _accounts(client, shop, True, True, True).json()["sales_parts"] == {
+        "cash": True, "electronic": True, "delivery": True}
+
+
+def test_none_on_is_refused(client, shop, methods):
+    resp = _accounts(client, shop, False, False, False)
+    assert resp.status_code == 422
+    assert resp.json()["error"] == "No sales account is ticked yet. Tick at least one to continue."
+    shop.entity.refresh_from_db()
+    assert shop.entity.sells_electronic is None
+
+
+@pytest.mark.parametrize("body", [{"cash": True, "electronic": "yes", "delivery": False},
+                                  {"cash": True, "electronic": True}])
+def test_each_account_must_be_on_or_off(client, shop, methods, body):
+    assert call(client, shop, "put", "/settings/sales-accounts", body).status_code == 422
+
+
+def test_a_cashier_cannot_change_the_sales_accounts(client, shop, methods):
+    cashier = member(shop, EntityRole.CASHIER)
+    assert call(client, shop, "get", "/settings", user=cashier).json()["permissions"]["edit_sales_accounts"] is False
+    assert _accounts(client, shop, True, True, False, user=cashier).status_code == 403
+    shop.entity.refresh_from_db()
+    assert shop.entity.sells_delivery is None
