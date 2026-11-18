@@ -235,6 +235,8 @@ def test_the_token_service_unreachable_is_a_503_not_not_connected(client, lists,
     xero.token_problem = XeroTokenUnavailable(reconnect=False)
     resp = call(client, lists, "get", "/settings/xero")
     assert (resp.status_code, resp.json()) == (503, {"error": xero_cards.UNREACHABLE})
+    # a disconnected company still has its organisation, so it is asked too: never "Xero's settings"
+    assert xero_cards.UNREACHABLE == "I couldn't load these settings just now. Try again in a moment."
 
 
 def test_a_company_never_connected_is_not_live_and_xero_is_never_asked(client, shop, xero):

@@ -45,7 +45,8 @@ logger = logging.getLogger("petty-cash-api")
 SYNC_SCOPE = "xero-sync"
 #: Two Xero fetches (accounts, then every page of contacts) behind accounts-api.
 SYNC_TIMEOUT = (5, 60)
-UNREACHABLE = "I couldn't reach Xero's settings just now. Try again in a moment."
+# asked of a disconnected company too (it keeps its organisation), so it never names Xero (2026-11-18)
+UNREACHABLE = "I couldn't load these settings just now. Try again in a moment."
 MAPPING_KEYS = ("main_bank", "deposit_bank", "cashsale_account", "electronicsale_account",
                 "deliverysale_account", "cashsale_contact", "owners_account", "owners_contact",
                 "discrepancy_account", "discrepancy_contact")
