@@ -648,12 +648,50 @@ def test_an_account_archived_in_xero_is_refused_by_name(client, mapped, xero, th
     report, *_ = _full_day(mapped)
     _copies(mapped, *AccountInfo.objects.filter(entity_id=mapped.entity.id).values_list("xero_account_id", flat=True))
     XeroAccount.objects.filter(entity_id=mapped.entity.id, xero_guid="acc-429").update(status="ARCHIVED")
+    xero.answers[("GET", "Accounts/acc-429")] = _Response(200, {"Accounts": [{"AccountID": "acc-429",
+                                                                              "Status": "ARCHIVED"}]})
 
     resp = _publish(client, mapped, report.id)
 
     assert resp.status_code == 409
     assert resp.json() == {"error": "Account 429 (429) is archived in Xero. Restore it in Xero or choose another "
                                     "account, then publish again."}
+    assert ("GET", "Accounts/acc-429", None) in xero.calls
+
+
+@pytest.mark.parametrize("stored", ["ARCHIVED", "DELETED"])
+def test_an_account_restored_in_xero_since_the_last_sync_publishes(client, mapped, xero, threads, stored):
+    """2026-11-18, Dine at Venus 2 - Demo: Office Supply was restored in Xero after the last sync, and
+    every publish still said it was archived. The publish asks Xero about a stored archived account
+    (the sync copies only ACTIVE ones, so an archived one reads DELETED) and takes its answer."""
+    from minty_db.models import XeroAccount
+
+    report, *_ = _full_day(mapped)
+    _copies(mapped, *AccountInfo.objects.filter(entity_id=mapped.entity.id).values_list("xero_account_id", flat=True))
+    XeroAccount.objects.filter(entity_id=mapped.entity.id, xero_guid="acc-429").update(status=stored)
+    AccountInfo.objects.filter(entity_id=mapped.entity.id, xero_code="429").update(status="ARCHIVED")
+    xero.answers[("GET", "Accounts/acc-429")] = _Response(200, {"Accounts": [{"AccountID": "acc-429",
+                                                                              "Status": "ACTIVE"}]})
+
+    assert _publish(client, mapped, report.id).status_code == 202
+    assert XeroAccount.objects.get(entity_id=mapped.entity.id, xero_guid="acc-429").status == "ACTIVE"
+    assert AccountInfo.objects.get(entity_id=mapped.entity.id, xero_code="429").status == "ACTIVE"
+    assert len(threads) == 1
+
+
+def test_an_archived_account_xero_cannot_be_asked_about_keeps_the_stored_answer(client, mapped, xero, threads):
+    from minty_db.models import XeroAccount
+
+    report, *_ = _full_day(mapped)
+    _copies(mapped, *AccountInfo.objects.filter(entity_id=mapped.entity.id).values_list("xero_account_id", flat=True))
+    XeroAccount.objects.filter(entity_id=mapped.entity.id, xero_guid="acc-429").update(status="ARCHIVED")
+    xero.answers[("GET", "Accounts/acc-429")] = requests.ConnectionError("down")
+
+    resp = _publish(client, mapped, report.id)
+
+    assert resp.status_code == 409
+    assert "Account 429 (429) is archived in Xero." in resp.json()["error"]
+    assert threads == []
 
 
 def test_a_contact_the_day_needs_archived_in_xero_is_refused_by_name(client, mapped, xero, threads):
