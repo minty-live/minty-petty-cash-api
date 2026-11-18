@@ -187,7 +187,7 @@ def export_petty_cash_report(request):
     if not report_csv.may_export(request.auth_user, entity_id):
         raise Refused(NO_EXPORT_ACCESS, 403)
     reports, first, last, _ = _export_reports(request, entity_id)
-    body = petty_cash_report_csv.rows(reports, currency_code(entity_id))
+    body = petty_cash_report_csv.rows(entity_id, reports, currency_code(entity_id))
     # Access-Control-Expose-Headers: Content-Disposition is settings.CORS_EXPOSE_HEADERS
     resp = HttpResponse(petty_cash_report_csv.to_csv(body), content_type="text/csv; charset=utf-8")
     resp["Content-Disposition"] = report_csv.export_disposition(

@@ -1,6 +1,6 @@
 """History's Petty Cash Report CSV (``GET /reports/petty-cash-report.csv``,
 ``services/petty_cash_report_csv.py``; owner, 2026-11-13): each submitted day's report, then its
-expense lines with their account and supplier."""
+sales (one line a method, positive) and expense lines (negative) with their account and supplier."""
 
 from __future__ import annotations
 
@@ -11,8 +11,17 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from minty_db.enums import EntityRole
-from minty_db.models import AccountInfo, Entity, ReportExpense, UserEntity, XeroContactSync
+from minty_db.enums import EntityRole, SaleType
+from minty_db.models import (
+    AccountInfo,
+    Entity,
+    EntitySaleSetting,
+    ReportExpense,
+    ReportSale,
+    SaleInfo,
+    UserEntity,
+    XeroContactSync,
+)
 
 from petty_cash.tests.conftest import WEB, headers, make_entity, make_report, make_user, url
 from petty_cash.tests.test_close import D3
@@ -37,8 +46,11 @@ def _range(days_back_start=2, days_back_end=0):
 @pytest.fixture
 def books(shop):
     """Two submitted days (the first published) and a draft before them. The lines: one with its
-    account and supplier, one whose account and supplier were deleted (the keys emptied; the published names stand in) and typed nothing,
-    one on an account with a Minty code only and no supplier."""
+    account and supplier, one whose account and supplier were deleted (the keys emptied; the
+    published names stand in) and typed nothing, one on an account with a Minty code only and no
+    supplier. The sales: Cash Sales, Octopus and Foodpanda in the company's order; the second day
+    has a zero (left out), a method since removed that still holds an amount (after the others),
+    and its cash only in the report's cash column (as older reports keep it)."""
     entity = shop.entity
     tape = AccountInfo.objects.create(id=uuid.uuid4(), entity_id=entity.id, type="EXPENSE", name="Tape",
                                       xero_account_id=str(uuid.uuid4()), xero_code="445", status="ACTIVE")
@@ -46,6 +58,20 @@ def books(shop):
                                      code="460", status="ACTIVE")
     abc = XeroContactSync.objects.create(id=uuid.uuid4(), entity_id=entity.id, name="ABC Supplies")
     base = datetime(2026, 10, 1, 9, tzinfo=UTC)
+    methods = {}
+    for order, (name, value_name, kind) in enumerate([("Foodpanda", "foodpanda_sales", SaleType.DELIVERY),
+                                                       ("Cash Sales", "cash_sales", SaleType.OTHER),
+                                                       ("Octopus", "octopus_sales", SaleType.ELECTRONIC)]):
+        row = SaleInfo.objects.filter(value_name=value_name).first() or SaleInfo.objects.create(
+            sale_name=name, value_name=value_name, type=kind)
+        # the company's order is the link's, not the catalogue's: Cash Sales, Octopus, Foodpanda
+        EntitySaleSetting.objects.create(entity_id=entity.id, sale_id=row.id, is_active=True,
+                                         display_order={"cash_sales": 1, "octopus_sales": 2}.get(value_name, 3))
+        methods[value_name] = row
+    gone = SaleInfo.objects.create(sale_name="Old Wallet", value_name="oldwallet_sales", type=SaleType.ELECTRONIC)
+
+    def sale(row, method, amount):
+        ReportSale.objects.create(report_id=row.id, sale_id=method.id, amount=Decimal(str(amount)))
 
     def report(days_back, status="submitted", **fields):
         return make_report(entity, D3 - timedelta(days=days_back), status=status, **fields)
@@ -64,20 +90,31 @@ def books(shop):
          published_account_code="400", published_account_name="Advertising",
          published_contact_name="Old Supplier")
     line(first, 1, "Tape", "25.10", "Tape, the wide roll", account_id=tape.id, contact_id=abc.id)
-    second = report(0, opening_balance=Decimal("47.4"), expense_total=Decimal("12.5"), discrepancy_amount=1,
-                    discrepancy_type="over", closing_balance=Decimal("35.9"))
+    sale(first, methods["foodpanda_sales"], 15)
+    sale(first, methods["cash_sales"], 300)
+    sale(first, methods["octopus_sales"], 25)
+    second = report(0, opening_balance=Decimal("47.4"), cashsale_total=60, nocashsale_total=8,
+                    expense_total=Decimal("12.5"), discrepancy_amount=1, discrepancy_type="over",
+                    closing_balance=Decimal("95.9"))
     line(second, 0, "Tea", "12.5", "Café 茶", account_id=tea.id)
+    sale(second, methods["octopus_sales"], 0)
+    sale(second, gone, 8)
     return shop
 
 
 ROWS = [
     [_day(1), "Daily report", "Published to Xero", "", "", "", "", "",
      "100.00", "20.00", "300.00", "40.00", "35.10", "500.00", "-2.50", "47.40", "Olive", "HKD"],
-    [_day(1), "Expense", "", "445", "Tape", "ABC Supplies", "Tape, the wide roll", "25.10", *NO_FIGURES, "HKD"],
-    [_day(1), "Expense", "", "400", "Advertising", "Old Supplier", "Blank", "10.00", *NO_FIGURES, "HKD"],
+    [_day(1), "Sale", "", "", "", "", "Cash Sales", "300.00", *NO_FIGURES, "HKD"],
+    [_day(1), "Sale", "", "", "", "", "Octopus", "25.00", *NO_FIGURES, "HKD"],
+    [_day(1), "Sale", "", "", "", "", "Foodpanda", "15.00", *NO_FIGURES, "HKD"],
+    [_day(1), "Expense", "", "445", "Tape", "ABC Supplies", "Tape, the wide roll", "-25.10", *NO_FIGURES, "HKD"],
+    [_day(1), "Expense", "", "400", "Advertising", "Old Supplier", "Blank", "-10.00", *NO_FIGURES, "HKD"],
     [_day(0), "Daily report", "Submitted", "", "", "", "", "",
-     "47.40", "0.00", "0.00", "0.00", "12.50", "0.00", "1.00", "35.90", "", "HKD"],
-    [_day(0), "Expense", "", "460", "Tea", "", "Café 茶", "12.50", *NO_FIGURES, "HKD"],
+     "47.40", "0.00", "60.00", "8.00", "12.50", "0.00", "1.00", "95.90", "", "HKD"],
+    [_day(0), "Sale", "", "", "", "", "Cash Sales", "60.00", *NO_FIGURES, "HKD"],
+    [_day(0), "Sale", "", "", "", "", "Old Wallet", "8.00", *NO_FIGURES, "HKD"],
+    [_day(0), "Expense", "", "460", "Tea", "", "Café 茶", "-12.50", *NO_FIGURES, "HKD"],
 ]
 
 
@@ -89,7 +126,7 @@ def _table(resp):
     return list(csv.reader(io.StringIO(resp.content.decode("utf-8"))))
 
 
-def test_each_day_is_its_report_then_its_expenses(client, books):
+def test_each_day_is_its_report_then_its_sales_then_its_expenses(client, books):
     resp = _get(client, books.entity, books.owner, **_range(2, 0))
 
     assert resp.status_code == 200, resp.content[:300]
@@ -100,6 +137,24 @@ def test_each_day_is_its_report_then_its_expenses(client, books):
         f"attachment; filename=acme-shop_petty-cash-report_{_day(2)}_to_{_day(0)}.csv")
     assert resp["Access-Control-Allow-Origin"] == WEB
     assert resp["Access-Control-Expose-Headers"] == "Content-Disposition"
+
+
+def test_the_queries_do_not_grow_with_the_days(client, books):
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    def count():
+        with CaptureQueriesContext(connection) as seen:
+            assert _get(client, books.entity, books.owner).status_code == 200
+        return len(seen)
+
+    before = count()
+    for n in range(2, 6):  # four more submitted days, each with a sale and an expense
+        day = make_report(books.entity, D3 + timedelta(days=n), opening_balance=0, closing_balance=0)
+        ReportSale.objects.create(report_id=day.id, sale_id=SaleInfo.objects.get(value_name="octopus_sales").id,
+                                  amount=1)
+        ReportExpense.objects.create(id=uuid.uuid4(), report_id=day.id, item="Tea", amount=1, description="x")
+    assert count() == before
 
 
 def test_a_company_with_no_currency_says_so(client, books):
