@@ -7,9 +7,9 @@ The range, the reports (submitted or published, never a draft), who may export a
 follow ``report_csv.py``; with no range the file is the company's whole history
 (``report_csv.every_submitted_report``). One table, by day:
 
-* a ``Daily report`` row: its Status pill, the day's figures (opening balance, cash added, cash and
-  non-cash sales, expenses, bank deposit, cash short/over - negative when short - and closing
-  balance) and the first name of who submitted it;
+* a ``Daily report`` row: the day's figures (opening balance, cash added, cash and non-cash sales,
+  expenses, bank deposit, cash short/over - negative when short - and closing balance; owner,
+  2026-11-18: no status or submitter columns);
 * a ``Sale`` row per sales method with an amount (owner, 2026-11-18: sales top to bottom), in the
   company's method order, then any method since switched off or removed that still holds an amount
   (by name); a zero is left out. Cash is its method's row, else - as older reports keep it - the
@@ -30,17 +30,16 @@ from __future__ import annotations
 from decimal import Decimal
 
 from minty_db.enums import DiscrepancyType
-from minty_db.models import AccountInfo, ReportExpense, ReportSale, SaleInfo, User, XeroContactSync
+from minty_db.models import AccountInfo, ReportExpense, ReportSale, SaleInfo, XeroContactSync
 
 from petty_cash.money import cents
 from petty_cash.services.report_csv import to_csv as _to_csv
-from petty_cash.services.report_page import report_status
 from petty_cash.services.sales import CASH_VALUE_NAME, sales_methods
 
 COLUMNS = (
-    "Date", "Line", "Status", "Account Code", "Account Name", "Contact", "Description", "Amount",
+    "Date", "Line", "Account Code", "Account Name", "Contact", "Description", "Amount",
     "Opening Balance", "Cash Added", "Cash Sales", "Non-cash Sales", "Expenses", "Bank Deposit",
-    "Cash Short/Over", "Closing Balance", "Submitted By", "Currency",
+    "Cash Short/Over", "Closing Balance", "Currency",
 )
 #: The file's name: ``<company>_petty-cash-report_<start>_to_<end>.csv``.
 FILE_LABEL = "petty-cash-report"
@@ -135,29 +134,26 @@ def rows(entity_id, reports, currency: str | None) -> list[list[str]]:
     """The CSV's rows (without the header) for ``reports``, all of ``entity_id``, in their order."""
     lines = _lines([r.id for r in reports])
     sales = _sales(entity_id, reports)
-    people = {r.created_by for r in reports if r.created_by}
-    names = dict(User.objects.filter(id__in=people).values_list("id", "first_name")) if people else {}
     code = currency or NO_CURRENCY
     out: list[list[str]] = []
     for report in reports:
         day = report.transaction_date.strftime("%Y-%m-%d")
         out.append([
-            day, REPORT_LINE, report_status(report)[0], "", "", "", "", "",
+            day, REPORT_LINE, "", "", "", "", "",
             _money(report.opening_balance), _money(report.cash_addition or 0),
             _money(report.cashsale_total or 0), _money(report.nocashsale_total or 0),
             _money(report.expense_total or 0), _money(report.bank_deposit or 0),
-            _money(_difference(report)), _money(report.closing_balance),
-            (names.get(report.created_by) or "").strip(), code,
+            _money(_difference(report)), _money(report.closing_balance), code,
         ])
         for name, amount in sales.get(str(report.id), []):
-            out.append([day, SALE_LINE, "", "", "", "", name, _money(amount), "", "", "", "", "", "", "", "", "", code])
+            out.append([day, SALE_LINE, "", "", "", name, _money(amount), "", "", "", "", "", "", "", "", code])
         for line in lines.get(str(report.id), []):
             words = (line.description or "").strip()
             if words in _EMPTY_DESCRIPTIONS:
                 words = (line.item or "").strip() or EXPENSE_LINE
             code_, name = line.account_pair
-            out.append([day, EXPENSE_LINE, "", code_, name, line.contact_name, words,
-                        _money(-(line.amount or 0)), "", "", "", "", "", "", "", "", "", code])
+            out.append([day, EXPENSE_LINE, code_, name, line.contact_name, words,
+                        _money(-(line.amount or 0)), "", "", "", "", "", "", "", "", code])
     return out
 
 

@@ -29,10 +29,10 @@ from petty_cash.tests.test_close import D3
 pytestmark = pytest.mark.django_db
 
 PATH = "/reports/petty-cash-report.csv"
-HEADER = ["Date", "Line", "Status", "Account Code", "Account Name", "Contact", "Description", "Amount",
+HEADER = ["Date", "Line", "Account Code", "Account Name", "Contact", "Description", "Amount",
           "Opening Balance", "Cash Added", "Cash Sales", "Non-cash Sales", "Expenses", "Bank Deposit",
-          "Cash Short/Over", "Closing Balance", "Submitted By", "Currency"]
-NO_FIGURES = [""] * 9  # Opening Balance .. Submitted By
+          "Cash Short/Over", "Closing Balance", "Currency"]
+NO_FIGURES = [""] * 8  # Opening Balance .. Closing Balance
 
 
 def _day(days_back):
@@ -103,18 +103,18 @@ def books(shop):
 
 
 ROWS = [
-    [_day(1), "Daily report", "Published to Xero", "", "", "", "", "",
-     "100.00", "20.00", "300.00", "40.00", "35.10", "500.00", "-2.50", "47.40", "Olive", "HKD"],
-    [_day(1), "Sale", "", "", "", "", "Cash Sales", "300.00", *NO_FIGURES, "HKD"],
-    [_day(1), "Sale", "", "", "", "", "Octopus", "25.00", *NO_FIGURES, "HKD"],
-    [_day(1), "Sale", "", "", "", "", "Foodpanda", "15.00", *NO_FIGURES, "HKD"],
-    [_day(1), "Expense", "", "445", "Tape", "ABC Supplies", "Tape, the wide roll", "-25.10", *NO_FIGURES, "HKD"],
-    [_day(1), "Expense", "", "400", "Advertising", "Old Supplier", "Blank", "-10.00", *NO_FIGURES, "HKD"],
-    [_day(0), "Daily report", "Submitted", "", "", "", "", "",
-     "47.40", "0.00", "60.00", "8.00", "12.50", "0.00", "1.00", "95.90", "", "HKD"],
-    [_day(0), "Sale", "", "", "", "", "Cash Sales", "60.00", *NO_FIGURES, "HKD"],
-    [_day(0), "Sale", "", "", "", "", "Old Wallet", "8.00", *NO_FIGURES, "HKD"],
-    [_day(0), "Expense", "", "460", "Tea", "", "Café 茶", "-12.50", *NO_FIGURES, "HKD"],
+    [_day(1), "Daily report", "", "", "", "", "",
+     "100.00", "20.00", "300.00", "40.00", "35.10", "500.00", "-2.50", "47.40", "HKD"],
+    [_day(1), "Sale", "", "", "", "Cash Sales", "300.00", *NO_FIGURES, "HKD"],
+    [_day(1), "Sale", "", "", "", "Octopus", "25.00", *NO_FIGURES, "HKD"],
+    [_day(1), "Sale", "", "", "", "Foodpanda", "15.00", *NO_FIGURES, "HKD"],
+    [_day(1), "Expense", "445", "Tape", "ABC Supplies", "Tape, the wide roll", "-25.10", *NO_FIGURES, "HKD"],
+    [_day(1), "Expense", "400", "Advertising", "Old Supplier", "Blank", "-10.00", *NO_FIGURES, "HKD"],
+    [_day(0), "Daily report", "", "", "", "", "",
+     "47.40", "0.00", "60.00", "8.00", "12.50", "0.00", "1.00", "95.90", "HKD"],
+    [_day(0), "Sale", "", "", "", "Cash Sales", "60.00", *NO_FIGURES, "HKD"],
+    [_day(0), "Sale", "", "", "", "Old Wallet", "8.00", *NO_FIGURES, "HKD"],
+    [_day(0), "Expense", "460", "Tea", "", "Café 茶", "-12.50", *NO_FIGURES, "HKD"],
 ]
 
 
