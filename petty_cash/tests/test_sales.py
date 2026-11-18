@@ -237,6 +237,8 @@ def test_the_lists_follow_the_business_type(client, shop, methods, business, gro
 @pytest.mark.parametrize("business, cash, electronic, delivery, parts", [
     ("fnb", True, None, None, {"cash": True, "electronic": True, "delivery": True}),
     (None, None, None, None, {"cash": True, "electronic": True, "delivery": True}),
+    # "None of these" (owner, 2026-11-18): only Cash Sales until chosen
+    (None, True, None, None, {"cash": True, "electronic": False, "delivery": False}),
     ("retail", True, None, None, {"cash": True, "electronic": True, "delivery": False}),
     ("fnb", True, True, False, {"cash": True, "electronic": True, "delivery": False}),
     ("fnb", True, False, False, {"cash": True, "electronic": False, "delivery": False}),

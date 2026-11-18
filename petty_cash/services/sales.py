@@ -50,10 +50,14 @@ def sales_parts(entity_id) -> dict:
         or {}
     )
     electronic, delivery = row.get("sells_electronic"), row.get("sells_delivery")
+    # "None of these" (no type, the question answered): Cash Sales only until chosen (owner,
+    # 2026-11-18). A company from before the questions (no answer either) keeps every part.
+    none_of_these = row.get("business_type") is None and row.get("uses_sales_cash") is not None
     return {
         "cash": row.get("uses_sales_cash") is not False,
-        "electronic": True if electronic is None else electronic,
-        "delivery": (row.get("business_type") not in NON_CASH_BUSINESSES) if delivery is None else delivery,
+        "electronic": (not none_of_these) if electronic is None else electronic,
+        "delivery": (row.get("business_type") not in NON_CASH_BUSINESSES and not none_of_these)
+        if delivery is None else delivery,
     }
 
 

@@ -77,7 +77,8 @@ Non-cash. Tests: `test_sales.py::test_the_lists_follow_the_business_type`, and t
 3).** `GET /reports/sales` sends `parts: {cash, electronic, delivery}` (`services/sales.py::sales_parts`):
 Cash Sales is the cash answer (`uses_sales_cash`, NULL = yes); Electronic Payments and Delivery Sales
 are `entities.sells_electronic`/`sells_delivery` (minty-db v0.11), NULL = the business type picks
-(Restaurant & Food and no type both, retail/service/general Electronic only) - minty-onboarding-api's
+(Restaurant & Food both, retail/service/general Electronic only, "None of these" neither - owner
+2026-11-18; a company from before the questions every part) - minty-onboarding-api's
 `sales_ticks` says the same. A method of a part that is off gets no field and no row on save
 (`shown(method, parts)`); a Non-cash company with no Delivery part keeps its delivery methods inside
 Non-cash, as before. The close read, the Daily Report and Settings do not read `parts` yet. Pinned to

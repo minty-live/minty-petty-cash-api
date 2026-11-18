@@ -315,7 +315,8 @@ def test_ticking_codes_lists_a_newly_eligible_account(client, lists, xero):
 def test_a_xero_company_banking_all_its_sales_needs_no_cash_sale_account_or_contact(client, lists, xero):
     from petty_cash.services.xero_settings import missing_slots
 
-    Entity.objects.filter(id=lists.entity.id).update(uses_sales_cash=False)
+    # a restaurant (with no type it would be "None of these": Cash only, so no other sales codes)
+    Entity.objects.filter(id=lists.entity.id).update(uses_sales_cash=False, business_type="fnb")
     read = call(client, lists, "get", "/settings/xero").json()
     assert {f["key"] for f in read["mapping"] if f["optional"]} == {
         "cashsale_account", "cashsale_contact", "electronicsale_account", "deliverysale_account"}
