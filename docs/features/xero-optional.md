@@ -49,6 +49,8 @@ come.
 A Minty company that signs in to Xero is matched first (minty-accounts-api `xero/services/matching.py`):
 until Finish it keeps `setup_mode` `minty` with an organisation recorded, and publishing is refused
 before any Xero call ("Finish matching your accounts to Xero first (Settings, under Integration), then
+publish."). Once Xero is connected and matched, any report can be published, however old (owner,
+2026-11-18: the "from before Xero was connected" cut-off is gone).
 
 **Phase 3 of the matching (owner, 2026-11-12).** The same refusal holds every publish while
 `entities.xero_matching` is `first`, `new_accounts` or `new_org`; a change of the matches (`change`)
@@ -60,9 +62,6 @@ choose another account, then publish again." A company with no copies at all isn
 Suppliers aren't held: the publish re-creates (Petty Cash) or re-publishes into the current
 organisation (Payment Request) as before. Checked on production's data (local `postgres`, 2026-11-12):
 4 companies have an unpublished record on an account Xero archived; no other publish changes.
-publish."). Finish sets `entities.xero_publish_from` to that day (owner: only records from then on go
-to Xero), so a report dated before it is refused ("This report is from before Xero was connected, so
-it stays in Minty."). NULL - every company connected from the start - is no cut-off.
 
 **Minty's books until Finish (2026-11-11).** `minty_on_its_own` is `setup_mode = 'minty'` alone: an
 organisation recorded mid-matching no longer makes the company a Xero company here (it did, and

@@ -261,14 +261,18 @@ def test_publishing_waits_while_the_accounts_are_being_matched(client, minty, mo
     assert (resp.status_code, resp.json()) == (409, {"error": pub.STILL_MATCHING})
 
 
-def test_a_report_from_before_xero_was_connected_stays_in_minty(client, minty, monkeypatch):
-    """Finish sets xero_publish_from (owner: only records from then on go to Xero)."""
-    monkeypatch.setattr(pub, "xero_token", lambda entity_id: (_ for _ in ()).throw(AssertionError("asked Xero")))
+def test_a_report_from_before_xero_was_connected_goes_to_xero_too(client, minty, monkeypatch):
+    """Owner, 2026-11-18: once Xero is connected, any report can be published, however old - the
+    publish goes on to ask for the Xero token (refused here, so nothing is sent)."""
+    def no_token(entity_id):
+        raise pub.XeroTokenUnavailable(reconnect=True)
+
+    monkeypatch.setattr(pub, "xero_token", no_token)
     Entity.objects.filter(id=minty.entity.id).update(setup_mode="xero", xero_org_id="org-1", status="connected",
                                                      xero_publish_from=dt.date(2026, 11, 11))
-    report = make_report(minty.entity, dt.date(2026, 11, 10), created_by=minty.owner.id)
+    report = make_report(minty.entity, dt.date(2020, 1, 1), created_by=minty.owner.id)
     resp = client.post(url(minty.entity.id, f"/reports/{report.id}/publish"), headers=headers(minty.owner.id))
-    assert (resp.status_code, resp.json()) == (409, {"error": pub.BEFORE_XERO})
+    assert (resp.status_code, resp.json()["error"]) == (400, pub.RECONNECT)
 
 
 def test_an_archived_account_is_no_code_to_offer(client, minty):

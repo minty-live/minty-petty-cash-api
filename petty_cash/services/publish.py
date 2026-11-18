@@ -80,8 +80,6 @@ ARCHIVED_ACCOUNT = ("{name} ({code}) is archived in Xero. Restore it in Xero or 
 #: A Petty Cash contact the day needs that Xero archived (2026-11-17): every publish of that step fails.
 ARCHIVED_CONTACT = ("{name}, your {label}, is archived in Xero. Restore it in Xero or choose another in Settings, "
                     "under Petty Cash Settings, then publish again.")
-#: Finish set ``entities.xero_publish_from`` (owner: only records from then on go to Xero).
-BEFORE_XERO = "This report is from before Xero was connected, so it stays in Minty."
 CONNECTIONS_URL = "https://api.xero.com/connections"
 
 
@@ -177,8 +175,6 @@ def start_publish(entity_id, report: Report, person) -> dict:
         raise PublishRefused(STILL_MATCHING, 409)
     if minty_on_its_own(entity_id):
         raise PublishRefused(NOT_IN_XERO, 409)
-    if entity.xero_publish_from and report.transaction_date and report.transaction_date < entity.xero_publish_from:
-        raise PublishRefused(BEFORE_XERO, 409)
     try:
         token = xero_token(entity_id)
     except XeroTokenUnavailable as unavailable:
