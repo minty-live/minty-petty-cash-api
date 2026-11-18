@@ -1,7 +1,7 @@
 # Expense AI - reading a receipt into the expense form
 
-When a receipt is attached on minty-petty-cash-web's Expenses stage, a vision model reads it and the
-form's fields (amount, date, description, supplier, account) are **pre-filled as suggestions** the
+When a receipt is attached on minty-petty-cash-web's Expenses stage and the person presses **Read the
+receipt** (never on attaching it - owner, 2026-11-18), a vision model reads it and the form's fields (amount, date, description, supplier, account) are **pre-filled as suggestions** the
 person confirms. Nothing is saved without their **Add**, a supplier is never created automatically,
 and the form stays editable while the read runs (or fails) in the background. The product and
 technical plans are Minty's `docs/expense_ai/Stage 1 *.md` (history; their section numbers are the
@@ -13,6 +13,8 @@ shares with minty-payment-request-api's invoice reader. The answer to the web is
 
 ## Where it lives
 
+- `GET /reports/expenses` carries `reader: {"enabled": bool}` (`EXPENSE_AI_ENABLED`, read on the
+  call; 2026-11-18): the app offers "Read the receipt" only when it is on.
 - `POST /reports/expenses/extract` (`petty_cash/routes/expenses.py::extract_expense`) - who may
   ask (`require_edit`, 403) and the file (one PDF / JPEG / PNG of at most 10 MB by its bytes,
   `services/expenses.py::checked_receipt`, 422) are refused with the Expenses step's sentences.
@@ -47,7 +49,7 @@ the engine shouts when Google's quota errors contradict it.
 
 | Variable | Meaning |
 |---|---|
-| `EXPENSE_AI_ENABLED` | off unless on - the route answers `disabled` and the app shows no suggestions |
+| `EXPENSE_AI_ENABLED` | off unless on - the expenses page says `reader.enabled: false` (no button), the route answers `disabled` and the app shows no suggestions |
 | `EXPENSE_AI_MODEL` (`gemini-3.5-flash`), `EXPENSE_AI_THINKING_LEVEL` (`low`), `EXPENSE_AI_MAX_OUTPUT_TOKENS` (4096), `EXPENSE_AI_TIMEOUT_S` (25) | the call |
 | `EXPENSE_AI_RATE_USER_PER_MIN` (10), `EXPENSE_AI_RATE_ENTITY_PER_HOUR` (200) | in-process rate limits per person and per company |
 | `EXPENSE_AI_CONF_HIGH` (0.85), `EXPENSE_AI_CONF_MEDIUM` (0.60) | the confidence bands |

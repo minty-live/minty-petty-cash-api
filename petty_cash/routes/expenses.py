@@ -140,6 +140,8 @@ def expenses_page(request):
         "accounts": [{"id": public_id(a), "code": a.xero_code or "", "name": a.name}
                      for a in expense_accounts(entity_id)],
         "permissions": {"create_supplier": has_permission(request.auth_user, Permission.CONTACT_CREATE, entity_id)},
+        # whether "Read the receipt" is offered: the receipt is read only on that press (owner, 2026-11-18)
+        "reader": {"enabled": receipt_reader.CONFIG.enabled()},
     }
 
 

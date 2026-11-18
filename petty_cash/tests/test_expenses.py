@@ -140,6 +140,21 @@ def test_the_page_brings_the_lines_and_what_a_line_may_use(client, shop, lists, 
     assert body["permissions"] == {"create_supplier": True}
 
 
+@pytest.mark.parametrize(("switch", "enabled"), [("true", True), ("false", False), (None, False)])
+def test_the_page_says_whether_the_receipt_reader_is_on(client, shop, lists, monkeypatch, switch, enabled):
+    """The app offers "Read the receipt" only when ``EXPENSE_AI_ENABLED`` is on (off unless set)."""
+    _draft(shop)
+    if switch is None:
+        monkeypatch.delenv("EXPENSE_AI_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("EXPENSE_AI_ENABLED", switch)
+
+    resp = _get(client, shop)
+
+    assert resp.status_code == 200, resp.content
+    assert resp.json()["reader"] == {"enabled": enabled}
+
+
 def test_with_no_draft_the_page_goes_back_to_opening(client, shop, lists):
     resp = _get(client, shop)
 
