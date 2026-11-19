@@ -35,6 +35,37 @@
         ]
       }
     },
+    "/api/petty-cash/v1/companies/{entity_id}/contacts/{contact_id}/xero-link": {
+      "post": {
+        "description": "``{xero_contact_id}``: the Minty contact now uses that Xero contact (one of the company's\nactive copies) - merged into the Minty contact already holding it, if any (accounts-api's relink,\nthe one implementation). Minty never restores anything in Xero.",
+        "operationId": "petty_cash_routes_report_map_contact",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "contact_id",
+            "required": true,
+            "schema": {
+              "title": "Contact Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "PettyCashBearerAuth": []
+          }
+        ],
+        "summary": "Map Contact",
+        "tags": [
+          "Report"
+        ]
+      }
+    },
     "/api/petty-cash/v1/companies/{entity_id}/deposit-correction": {
       "post": {
         "operationId": "petty_cash_routes_home_deposit_correction",
@@ -632,6 +663,36 @@
         ]
       }
     },
+    "/api/petty-cash/v1/companies/{entity_id}/reports/{report_id}/history": {
+      "get": {
+        "operationId": "petty_cash_routes_history_publish_attempts",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "report_id",
+            "required": true,
+            "schema": {
+              "title": "Report Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "PettyCashBearerAuth": []
+          }
+        ],
+        "summary": "Publish Attempts",
+        "tags": [
+          "History"
+        ]
+      }
+    },
     "/api/petty-cash/v1/companies/{entity_id}/reports/{report_id}/outcome": {
       "get": {
         "operationId": "petty_cash_routes_close_report_outcome",
@@ -1031,6 +1092,27 @@
         "summary": "Add Supplier",
         "tags": [
           "Expenses"
+        ]
+      }
+    },
+    "/api/petty-cash/v1/companies/{entity_id}/xero/contacts": {
+      "get": {
+        "description": "The contacts the company's Xero has (the stored active copies), A to Z - what a contact\narchived in Xero can be mapped to at publish. ``REPORT_PUBLISH``: the person publishing maps.",
+        "operationId": "petty_cash_routes_report_xero_contacts",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "PettyCashBearerAuth": []
+          }
+        ],
+        "summary": "Xero Contacts",
+        "tags": [
+          "Report"
         ]
       }
     },

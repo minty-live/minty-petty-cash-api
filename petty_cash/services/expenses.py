@@ -37,7 +37,13 @@ from minty_shared import fx
 from petty_cash.files import storage
 from petty_cash.money import cents
 from petty_cash.services.cash import _money
-from petty_cash.services.reports import log_history, update_draft_progress
+from petty_cash.services.reports import (
+    NOT_SENT,
+    check_version,
+    log_history,
+    mark_saved,
+    update_draft_progress,
+)
 from petty_cash.services.sales import cash_sales_from_detail
 
 logger = logging.getLogger("petty-cash-api")
@@ -332,9 +338,32 @@ def delete_expense(report: Report, line: ReportExpense, user) -> Decimal:
 
 
 @transaction.atomic
-def save_expenses_step(report: Report, action_type: str) -> Report:
-    """Save & Next marks Expenses done and moves the report on to the deposit."""
+def save_expenses_step(report: Report, action_type: str, user, opened=NOT_SENT) -> Report:
+    """Save & Next marks Expenses done and moves the report on to the deposit. A save opened from
+    another ``edit_version`` raises ``StepAlreadySaved`` (owner's decisions doc R2, 2026-11-19);
+    the lines themselves never touch the version, so two people's lines both stay."""
     locked = Report.objects.select_for_update().get(id=report.id)
+    check_version(locked, opened)
     update_draft_progress(locked, action_type, "expenses", "deposit")
+    mark_saved(locked, user)
     locked.save()
     return locked
+
+
+# ---- the duplicate reminder (the owner's decisions doc DUP1, 2026-11-19) ----------------------------
+
+#: Asked before a save that repeats another line; "save anyway" always saves - it never blocks.
+DUPLICATE = "This looks like an expense you already have on this day: the same supplier and amount. Save it anyway?"
+
+
+def duplicates(report: Report, supplier: XeroContactSync | None, amount: Decimal, exclude_id=None) -> list[dict]:
+    """The report's other lines with the same contact and exactly the same amount - the same date is
+    the report's own day (one report per company and day)."""
+    if supplier is None or amount is None:
+        return []
+    rows = ReportExpense.objects.filter(report_id=report.id, contact_id=supplier.id, amount=amount)
+    if exclude_id is not None:
+        rows = rows.exclude(id=exclude_id)
+    return [{"id": str(r.id), "description": r.description or "", "amount": f"{r.amount:.2f}",
+             "supplier": supplier.name} for r in rows.order_by("created_at")]
+

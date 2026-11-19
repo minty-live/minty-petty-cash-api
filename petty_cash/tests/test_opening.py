@@ -47,6 +47,7 @@ def test_a_first_report_reads_as_nothing_yet(client, shop):
         "transaction_date": D3.isoformat(),
         "currency_code": "HKD",
         "draft": None,
+        "edit_version": None,
         "starting_cash_balance": 0.0,
         "yesterday_closing_balance": 0.0,
         "safebox_balance": 0.0,

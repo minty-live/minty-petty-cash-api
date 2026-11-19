@@ -2,9 +2,11 @@
 
 - ``GET /reports/sales?transaction_date=``: the day's draft (null before Opening made one), the
   company's electronic and delivery methods in Settings order with the day's amounts, and the cash.
-- ``PUT /reports/sales`` ``{transaction_date, cash_sales, amounts: {value_name: amount}, action}``:
-  a method left out is zero; an amount is 0 to 99,999,999,999.99; a method the company has not
-  switched on is 422. No draft for the day is 409 ``{error, to: "opening"}``.
+- ``PUT /reports/sales`` ``{transaction_date, cash_sales, amounts: {value_name: amount}, action,
+  edit_version}``: a method left out is zero; an amount is 0 to 99,999,999,999.99; a method the
+  company has not switched on is 422. No draft for the day is 409 ``{error, to: "opening"}``; a save
+  opened from an older ``edit_version`` is 409 ``{error, saved, next: "expenses"}`` (owner's
+  decisions doc R2, 2026-11-19).
 """
 
 from __future__ import annotations
@@ -17,12 +19,20 @@ from petty_cash.money import cents, out
 from petty_cash.routes._input import (
     BAD_DATE,
     action_type,
+    already_saved,
     amount,
     json_body,
+    opened_version,
     query_day,
     require_edit,
 )
-from petty_cash.services.reports import currency_code, draft_payload, find_draft, progress_payload
+from petty_cash.services.reports import (
+    StepAlreadySaved,
+    currency_code,
+    draft_payload,
+    find_draft,
+    progress_payload,
+)
 from petty_cash.services.sales import (
     CASH_VALUE_NAME,
     page_methods,
@@ -50,6 +60,7 @@ def sales_payload(entity_id, day) -> dict:
         "transaction_date": day.isoformat(),
         "currency_code": currency_code(entity_id),
         "draft": draft_payload(draft),
+        "edit_version": draft.edit_version if draft is not None else None,
         "methods": [
             {**m, "amount": out(m["amount"]) if m["amount"] else None}
             for m in methods
@@ -94,7 +105,7 @@ def _valid_save(body, value_names: dict) -> dict:
     action = action_type(body)
     if action is None:
         raise Refused("Choose Save & Next or Save & Exit.", 422)
-    return {"day": day, "cash": cash, "amounts": amounts, "action_type": action}
+    return {"day": day, "cash": cash, "amounts": amounts, "action_type": action, "opened": opened_version(body)}
 
 
 @router.put("/reports/sales")
@@ -108,6 +119,9 @@ def save_sales_step(request):
     draft = find_draft(entity_id, save["day"])
     if draft is None:
         raise Refused(NO_DRAFT, 409, to="opening")
-    draft = save_sales(entity_id, request.auth_user, draft, {**save["amounts"], CASH_VALUE_NAME: save["cash"]},
-                       save["action_type"])
+    try:
+        draft = save_sales(entity_id, request.auth_user, draft, {**save["amounts"], CASH_VALUE_NAME: save["cash"]},
+                           save["action_type"], save["opened"])
+    except StepAlreadySaved as stale:
+        raise already_saved(stale, sales_payload(entity_id, save["day"]), "expenses") from None
     return progress_payload(draft, "expenses" if save["action_type"] == "save_next" else "dashboard")

@@ -80,7 +80,7 @@ def test_one_page_newest_first_with_what_may_be_done(client, shop, flask):
     first, second = body["reports"]
     assert first["transaction_date"] == D3.isoformat()
     assert (first["status"], first["status_label"], first["status_tone"]) == ("submitted", "Submitted", "info")
-    assert first["submitted_by"] == "Olive" and first["publish_reasons"] == []
+    assert first["submitted_by"] == "Olive"
     assert (first["total_sales"], first["total_expenses"]) == (12, 3)
     assert first["created_at"].endswith("+08:00") and first["submitted_at"] is None
     assert first["was_published"] is False and second["was_published"] is True
@@ -88,20 +88,23 @@ def test_one_page_newest_first_with_what_may_be_done(client, shop, flask):
     assert first["permissions"] == {"edit": True, "delete": True, "edit_details": False}
     assert second["status_label"] == "Publish failed"
     assert second["permissions"] == {"edit": False, "delete": False, "edit_details": True}
-    assert second["publish_reasons"] == [REASON]
     assert {k: body[k] for k in ("page", "per_page", "total_pages", "total_count", "latest_report_id",
                                  "can_publish", "currency_code")} == {
         "page": 1, "per_page": 10, "total_pages": 1, "total_count": 2, "latest_report_id": str(latest.id),
         "can_publish": True, "currency_code": "HKD"}
 
 
-def test_reasons_are_worked_out_here_never_asked_of_flask(client, shop, flask):
-    failed = _older(shop, days_back=1, publishing_status="failed")
-    latest = _older(shop, days_back=0)
+def test_the_list_carries_no_publish_reasons_and_asks_nobody(client, shop, flask, monkeypatch):
+    """A failed publish's issues are the report's History (``GET /reports/{id}/history``, H1
+    2026-11-19): the list no longer re-checks them (it asked Xero per failed row on every load)."""
+    monkeypatch.setattr("requests.get", lambda *a, **k: pytest.fail("the list asked Xero"))
+    _older(shop, days_back=1, publishing_status="failed")
+    _older(shop, days_back=0)
 
     reports = _get(client, shop).json()["reports"]
 
-    assert {r["id"]: r["publish_reasons"] for r in reports} == {str(latest.id): [], str(failed.id): [REASON]}
+    assert all("publish_reasons" not in r for r in reports)
+    assert [r["status_label"] for r in reports] == ["Submitted", "Publish failed"]
     assert flask.sent == []
 
 

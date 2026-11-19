@@ -11,6 +11,9 @@ The owner's rules of 2026-10-15: a deposit above the cash on hand is refused; AN
 a cent included; Save & Next needs a reason when there is a difference (Save & Exit keeps one
 without). Counts are whole numbers of 0 or more, a reason at most 300 characters, a report no
 longer a draft is refused, and a refused save writes nothing.
+
+Each save carries the ``edit_version`` its page was read at; one from an older version raises
+``StepAlreadySaved`` (owner's decisions doc R2, 2026-11-19).
 """
 
 from __future__ import annotations
@@ -23,7 +26,14 @@ from minty_db.models import Report
 
 from petty_cash.money import cents
 from petty_cash.services.denominations import denominations_for, save_counts
-from petty_cash.services.reports import currency_code, log_history, update_draft_progress
+from petty_cash.services.reports import (
+    NOT_SENT,
+    check_version,
+    currency_code,
+    log_history,
+    mark_saved,
+    update_draft_progress,
+)
 from petty_cash.services.sales import cash_sales_from_detail
 
 NEGATIVE = "Hmm, it looks like your cash balance is negative. Could you fix that first?"
@@ -158,32 +168,39 @@ def _log_count(report, user, total):
                 new_value=f"Cash Count: {_money(report, total)}")
 
 
-def save_deposit(report: Report, user, amount, action_type: str) -> Report:
+def save_deposit(report: Report, user, amount, action_type: str, opened=NOT_SENT) -> Report:
     with transaction.atomic():
         locked = Report.objects.select_for_update().get(id=report.id)
+        check_version(locked, opened)
         stored = _apply_deposit(locked, user, amount, action_type)
+        mark_saved(locked, user)
         locked.save()
         _log_deposit(locked, user, stored)
     return locked
 
 
-def save_cash_count(report: Report, user, counts: dict, safe_box, reason: str, action_type: str) -> Report:
+def save_cash_count(report: Report, user, counts: dict, safe_box, reason: str, action_type: str,
+                    opened=NOT_SENT) -> Report:
     with transaction.atomic():
         locked = Report.objects.select_for_update().get(id=report.id)
+        check_version(locked, opened)
         total = _apply_count(locked, user, counts, safe_box, reason, action_type)
+        mark_saved(locked, user)
         locked.save()
         _log_count(locked, user, total)
     return locked
 
 
 def save_deposit_and_count(report: Report, user, deposit, counts: dict, safe_box, reason: str,
-                           action_type: str) -> Report:
+                           action_type: str, opened=NOT_SENT) -> Report:
     """Part 15's Cash Count stage: the deposit, then the count, in ONE transaction - a refusal of
     either writes nothing. Save & Next marks both done."""
     with transaction.atomic():
         locked = Report.objects.select_for_update().get(id=report.id)
+        check_version(locked, opened)
         stored = _apply_deposit(locked, user, deposit, action_type)
         total = _apply_count(locked, user, counts, safe_box, reason, action_type)
+        mark_saved(locked, user)
         locked.save()
         _log_deposit(locked, user, stored)
         _log_count(locked, user, total)

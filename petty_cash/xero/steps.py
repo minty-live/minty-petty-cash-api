@@ -26,7 +26,7 @@ from petty_cash.money import cents
 from petty_cash.services.xero_settings import account_for_role, contact_for_role
 from petty_cash.xero import client, publish_record
 from petty_cash.xero import errors as pub_err
-from petty_cash.xero.contacts import ensure_contact
+from petty_cash.xero.contacts import ensure_contact, xero_id_for
 from petty_cash.xero.errors import PublishFailureReason, translate_xero_error
 from petty_cash.xero.receipts import attach_receipt
 
@@ -61,6 +61,11 @@ def _amount(value) -> float:
     return float(cents(value))
 
 
+#: A contact Xero couldn't be asked about or refused (owner's decisions doc C1, 2026-11-19): the entry
+#: fails rather than go to Xero without its contact.
+CONTACT_NOT_IN_XERO = "Xero couldn't find or add the contact {name}, please try again"
+
+
 def _module_error(run: Run, label: str, reason: str, meta: dict | None = None) -> None:
     meta = meta or {}
     run.pfr.add_module_error(label, reason, scope=meta.get("scope"), expense_id=meta.get("expense_id"),
@@ -93,7 +98,8 @@ def bank_transaction(run: Run, day, *, kind: str, purpose: str, contact_id, bank
         if contact_id:
             valid = ensure_contact(run, contact_id, contact_name)
             if not valid:
-                logger.warning("Publish: contact %s could not be confirmed; posting without one", contact_id)
+                _module_error(run, label, CONTACT_NOT_IN_XERO.format(name=contact_name or contact_id), meta)
+                return False
             contact_id = valid
         stamp = day.strftime("%Y%m%d")
         reference = {"expense": "Expense", "discrepancy": "Discrepancy"}.get(purpose, "Withdrawal")
@@ -205,14 +211,18 @@ def withdrawal(run: Run, report: Report, existing) -> tuple[int, int]:
                                     module="withdrawal_from")
                 return 0, 1
             petty = (account_for_role(run.entity.id, "pettycash") or {}).get("xero_account_id")
+            meta = {"scope": "entity", "deps": DEPS_WITHDRAWAL_PERSONAL, "module": "withdrawal_from"}
+            director_id = xero_id_for(run, director)
+            if director_id is None:
+                _module_error(run, "Withdrawal", CONTACT_NOT_IN_XERO.format(name=director.name), meta)
+                return 0, 1
             made = bank_transaction(
-                run, day, kind="RECEIVE", purpose="withdrawal", contact_id=director.xero_contact_id,
+                run, day, kind="RECEIVE", purpose="withdrawal", contact_id=director_id, contact_name=director.name,
                 bank_account_id=petty,
                 line_items=[{"description": f"Amount due to {director.name}", "quantity": 1,
                              "unitAmount": _amount(report.cash_addition), "accountCode": director_code,
                              "taxType": "NONE"}],
-                label="Withdrawal", meta={"scope": "entity", "deps": DEPS_WITHDRAWAL_PERSONAL, "module": "withdrawal_from"},
-                existing_id=_existing_id(existing, "BANK_TRANSACTION"),
+                label="Withdrawal", meta=meta, existing_id=_existing_id(existing, "BANK_TRANSACTION"),
             )
             if made:
                 _record(run, report, "withdrawal_from", made, "BANK_TRANSACTION")
@@ -282,12 +292,16 @@ def cash_sales(run: Run, report: Report, lines, existing) -> tuple[int, int]:
             run.pfr.add_missing(pub_err.LABEL_CASHSALE_CONTACT, deps=[["contact", "cashsale_contact"]],
                                 module="invoices")
             return 0, 1
+        contact_id = xero_id_for(run, contact)
+        if contact_id is None:
+            _module_error(run, "Cash sales", CONTACT_NOT_IN_XERO.format(name=contact.name), meta)
+            return 0, 1
         day = report.transaction_date
         stamp = f"MT{day.strftime('%Y%m%d')}"
         # the reference stays the cash sales one: an invoice published before the other lines keeps it
         description = f"{stamp}Cash Sales"
         payload = {"Invoices": [{
-            "Type": "ACCREC", "Contact": {"ContactID": contact.xero_contact_id},
+            "Type": "ACCREC", "Contact": {"ContactID": contact_id},
             "LineItems": [{"Description": f"{stamp}{label}", "Quantity": 1, "UnitAmount": _amount(amount),
                            "AccountCode": code, "TaxType": "NONE", "LineAmount": _amount(amount)}
                           for label, amount, code in lines],
@@ -344,10 +358,13 @@ def expenses(run: Run, report: Report, existing: dict, only_ids=None) -> tuple[i
             if index and index % EXPENSE_BATCH == 0:
                 time.sleep(BATCH_PAUSE)
             contact = line.contact
-            xero_contact = contact.xero_contact_id if contact else None
             label = f"Expense '{line.item}'"
+            xero_contact = xero_id_for(run, contact) if contact else None
             meta = {"scope": "expense", "expense_id": str(line.id), "failed_contact_id": xero_contact,
                     "module": "expenses"}
+            if contact and xero_contact is None:
+                _module_error(run, label, CONTACT_NOT_IN_XERO.format(name=contact.name), meta)
+                continue
             try:
                 made = bank_transaction(
                     run, report.transaction_date, kind="SPEND", purpose="expense", contact_id=xero_contact,
@@ -413,9 +430,13 @@ def discrepancy(run: Run, report: Report, existing) -> tuple[int, int]:
             _module_error(run, "Discrepancy", "discrepancy contact is not set up in Xero settings",
                           {"scope": "entity", "deps": [["contact", "discrepancy_contact"]], "module": "discrepancy"})
             return 0, 1
+        contact_id = xero_id_for(run, contact)
+        if contact_id is None:
+            _module_error(run, "Discrepancy", CONTACT_NOT_IN_XERO.format(name=contact.name), meta)
+            return 0, 1
         made = bank_transaction(
             run, report.transaction_date, kind="SPEND" if word == "short" else "RECEIVE", purpose="discrepancy",
-            contact_id=contact.xero_contact_id,
+            contact_id=contact_id, contact_name=contact.name,
             bank_account_id=(account_for_role(run.entity.id, "pettycash") or {}).get("xero_account_id"),
             line_items=[{"description": report.discrepancy_reason, "unitAmount": abs(_amount(report.discrepancy_amount)),
                          "accountCode": (account_for_role(run.entity.id, "discrepancy_account") or {}).get("account_code"),

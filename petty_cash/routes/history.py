@@ -1,9 +1,15 @@
 """Report history - Flask's ``petty_cash_api/routes/history.py``.
 
 ``GET /reports?status=&start_date=&end_date=&page=&per_page=``: one page of the company's reports,
-newest day first, each with its Status pill, its figures, who submitted it, a failed publish's
-reasons (``services/publish_reasons.py``, worked out here since Phase 3 of the Flask retirement,
-2026-11-05) and what this person may do to it. A bad filter is refused (422) with a sentence.
+newest day first, each with its Status pill, its figures, who submitted it and what this person may
+do to it. A bad filter is refused (422) with a sentence. A failed publish's reasons are no longer
+here (they asked Xero for every failed row on every load): they are the report's History below.
+
+``GET /reports/{id}/history``: the report's publish History (owner's H1, 2026-11-19) - every publish
+attempt, newest first, ``{"history": [{at, user_name, action, details: [{text, resolved}]}]}``
+(``services/publish_reasons.publish_history``: only the newest failed attempt is re-checked, while
+the report is still failed; older ones read ``resolved: null``). Refused as reading the report is
+(``routes/report.py``'s ``_report``: another company's, an unknown or an unviewable report is 404).
 
 ``GET /reports/export.csv?start_date=&end_date=``: the movements CSV of the submitted reports in the
 range (``services/report_csv.py``, Flask's ``report_csv.py`` byte for byte) as a file. Both dates,
@@ -32,9 +38,10 @@ from core.policy import Permission, can_delete_report, has_permission, report_ed
 from petty_cash.days import hk
 from petty_cash.money import out
 from petty_cash.routes.close import _iso
+from petty_cash.routes.report import _report
 from petty_cash.services import petty_cash_report_csv, report_csv
 from petty_cash.services.history import STATUS_FILTERS, report_history
-from petty_cash.services.publish_reasons import publish_reasons
+from petty_cash.services.publish_reasons import publish_history
 from petty_cash.services.report_actions import was_published
 from petty_cash.services.report_page import report_status
 from petty_cash.services.reports import currency_code, last_submitted
@@ -88,8 +95,6 @@ def history(request):
     filters = _filters(request.GET)
     entity_id, person = request.company.id, request.auth_user
     data = report_history(entity_id, **filters)
-    failed = [r.id for r in data["reports"] if r.publishing_status == "failed"]
-    reasons = publish_reasons(entity_id, failed) if failed else {}
     may_edit = report_edit_rule(person, entity_id)  # a cashier: only their own reports
     # report_actions.may_delete, its publish right read once: a report in Xero needs accountant and up
     may_publish = has_permission(person, Permission.REPORT_PUBLISH, entity_id)
@@ -123,7 +128,6 @@ def history(request):
             # it has been to Xero, even if edited since: the delete warns (as GET /reports/{id})
             "was_published": was_published(report),
             "xero_removable": str(report.id) in removable,  # a delete takes its entries out of Xero
-            "publish_reasons": reasons.get(str(report.id), []),
             "permissions": {
                 "edit": latest and not draft and may_edit(report),
                 "delete": ((latest and not draft) or stale) and can_delete_report(person, report)
@@ -145,6 +149,12 @@ def history(request):
         "can_publish": has_permission(person, Permission.REPORT_PUBLISH, entity_id)
         and not minty_on_its_own(entity_id),  # Xero optional: nowhere to publish to
     }
+
+
+@router.get("/reports/{report_id}/history")
+def publish_attempts(request, report_id: str):
+    report = _report(request, report_id)
+    return {"history": publish_history(request.company.id, report)}
 
 
 def _export_reports(request, entity_id):

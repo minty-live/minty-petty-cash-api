@@ -16,7 +16,10 @@
   2026-11-19); adding or changing a line takes those six details back (``fx.COLUMNS``), checked
   against its amount by ``fx.saved_exchange`` - all or none, else 422.
 - ``GET /expense-lines/{id}/receipts/{attachment id}``: the receipt's bytes - by id, never by key.
-- ``PUT /reports/expenses`` ``{transaction_date, action}``: the step's Save & Next / Save & Exit.
+- ``PUT /reports/expenses`` ``{transaction_date, action, edit_version}``: the step's Save & Next /
+  Save & Exit. A Save & Next opened from an older ``edit_version`` is 409 ``{error: "This step was
+  already saved by {name} at {time}", saved, next: "deposit"}`` (owner's decisions doc R2,
+  2026-11-19); adding, changing or deleting a line never checks or moves the version.
 - ``POST /suppliers`` ``{name}``: a new supplier, created in the company's Xero organisation
   (``CONTACT_CREATE``) - 201 ``{id, name}``; a refusal from the connection is 409, Flask's token
   service unreachable 503.
@@ -50,14 +53,17 @@ from petty_cash.money import MAX_AMOUNT, cents, out
 from petty_cash.routes._input import (
     BAD_DATE,
     action_type,
+    already_saved,
     form_and_files,
     json_body,
+    opened_version,
     query_day,
     require_edit,
 )
 from petty_cash.services import receipt_reader
 from petty_cash.services.expenses import (
     CLEAR_EXCHANGE,
+    DUPLICATE,
     KEEP_A_RECEIPT,
     KEEP_EXCHANGE,
     NOT_A_DRAFT,
@@ -65,6 +71,7 @@ from petty_cash.services.expenses import (
     add_expense,
     checked_receipt,
     delete_expense,
+    duplicates,
     expense_accounts,
     find_account,
     find_supplier,
@@ -74,7 +81,13 @@ from petty_cash.services.expenses import (
     suppliers,
     update_expense,
 )
-from petty_cash.services.reports import currency_code, draft_payload, find_draft, progress_payload
+from petty_cash.services.reports import (
+    StepAlreadySaved,
+    currency_code,
+    draft_payload,
+    find_draft,
+    progress_payload,
+)
 from petty_cash.services.suppliers import MAX_NAME as MAX_SUPPLIER_NAME
 from petty_cash.services.suppliers import SupplierRefused, create_supplier
 
@@ -127,11 +140,8 @@ def lines_payload(rows) -> list[dict]:
     return payload
 
 
-@router.get("/reports/expenses")
-def expenses_page(request):
-    require_edit(request)
+def expenses_payload(request, day) -> dict:
     entity_id = request.company.id
-    day = query_day(request, required=True)
     draft = find_draft(entity_id, day)
     if draft is None:
         raise Refused(NO_DRAFT, 409, to="opening")
@@ -140,6 +150,7 @@ def expenses_page(request):
         "transaction_date": day.isoformat(),
         "currency_code": currency_code(entity_id),
         "draft": draft_payload(draft),
+        "edit_version": draft.edit_version,
         "lines": lines_payload(rows),
         "total": out(sum((cents(r.amount) for r in rows), Decimal("0.00"))),
         "suppliers": [{"id": public_id(c), "name": c.name} for c in suppliers(entity_id)],
@@ -150,6 +161,12 @@ def expenses_page(request):
         # reads left, shared with Payment Request (owner, 2026-11-18)
         "reader": receipt_reader.reader_status(entity_id),
     }
+
+
+@router.get("/reports/expenses")
+def expenses_page(request):
+    require_edit(request)
+    return expenses_payload(request, query_day(request, required=True))
 
 
 def _amount(raw) -> Decimal | None:
@@ -210,12 +227,23 @@ def add_expense_line(request):
     draft = find_draft(entity_id, day)
     if draft is None:
         raise Refused(NO_DRAFT, 409, to="opening")
+    _ask_about_duplicates(form, draft, supplier, amount)
     try:
         line = add_expense(draft, request.auth_user, amount=amount, description=description, supplier=supplier,
                            account=account, receipt=data, receipt_mime=mime, receipt_name=name, exchange=exchange)
     except ExpenseRefused as refused:
         raise Refused(refused.message, 409) from None
     return JsonResponse({"line": lines_payload([line])[0], "total": out(draft.expense_total)}, status=201)
+
+
+def _ask_about_duplicates(form, report, supplier, amount, exclude_id=None) -> None:
+    """DUP1 (owner's decisions doc, 2026-11-19): a line repeating another - same day, contact and
+    amount - is asked about first (409 with the ``duplicates``); ``confirm_duplicate=true`` saves it."""
+    if str(form.get("confirm_duplicate") or "").lower() == "true":
+        return
+    found = duplicates(report, supplier, amount, exclude_id=exclude_id)
+    if found:
+        raise Refused(DUPLICATE, 409, duplicates=found)
 
 
 def _company_line(entity_id, line_id) -> tuple[ReportExpense | None, Report | None]:
@@ -302,6 +330,7 @@ def edit_expense_line(request, line_id: str):
     if exchange is None:
         exchange = CLEAR_EXCHANGE if cents(amount) != cents(line.amount) else KEEP_EXCHANGE
 
+    _ask_about_duplicates(form, report, supplier or line.contact, amount, exclude_id=line.id)
     try:
         line = update_expense(report, line, request.auth_user, amount=amount, description=description, supplier=supplier,
                               account=account, receipt=receipt, remove_receipt_ids=remove, exchange=exchange)
@@ -372,12 +401,16 @@ def save_expenses_step_route(request):
     action = action_type(body)
     if action is None:
         raise Refused("Choose Save & Next or Save & Exit.", 422)
+    opened = opened_version(body)
     draft = find_draft(entity_id, day)
     if draft is None:
         raise Refused(NO_DRAFT, 409, to="opening")
     # Flask's Save & Exit records nothing (the page leaves without calling the server).
     if action == "save_next":
-        draft = save_expenses_step(draft, "save_next")
+        try:
+            draft = save_expenses_step(draft, "save_next", request.auth_user, opened)
+        except StepAlreadySaved as stale:
+            raise already_saved(stale, expenses_payload(request, day), "deposit") from None
     return progress_payload(draft, "deposit" if action == "save_next" else "dashboard")
 
 

@@ -19,6 +19,10 @@ Each item is re-checked against the current state:
 - **An account** is the database's word: archived accounts leave ``account_info`` on sync.
 
 A check that fails never breaks the list. The reason then reads unresolved.
+
+``publish_history`` is the report's History (owner's H1, 2026-11-19; ``GET /reports/{id}/history``):
+every publish attempt, newest first, with who and when. Only its newest failed attempt is re-checked,
+and only while the report is still failed, so one read asks Xero about one attempt at most.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ import re
 
 import requests
 from django.conf import settings
+from django.db.models import Q
 from minty_db.models import (
     AccountInfo,
     Report,
@@ -37,6 +42,8 @@ from minty_db.models import (
 )
 
 from core.xero_tokens import XeroTokenUnavailable, xero_token
+from petty_cash.days import hk
+from petty_cash.people import display_name
 from petty_cash.services.xero_settings import account_for_role, contact_for_role
 from petty_cash.xero.errors import PublishFailureReason
 from petty_cash.xero.steps import DEPS_CASH_SALES, DEPS_DEPOSIT, DEPS_DISCREPANCY
@@ -53,6 +60,12 @@ MAX_REPORTS = 100
 CONTACT_TIMEOUT = (5, 15)
 
 _EXPENSE_TEXT_RE = re.compile(r"^Expense '(.+?)'")
+
+#: A publish attempt's ``report_history`` action: a success, a failure, or an old failure that
+#: carries its reason in the action itself (``publish_failed: ...``).
+PUBLISHED = "published"
+PUBLISH_FAILED = PublishFailureReason.HISTORY_ACTION_LABEL
+_OLD_FAILED_PREFIX = f"{PUBLISH_FAILED}:"
 
 
 
@@ -243,3 +256,38 @@ def publish_reasons(entity_id, report_ids) -> dict[str, list[dict]]:
         items = annotate(entity_id, latest_reason_items(report), report_id=report.id, cache=cache)
         answer[str(report.id)] = [{"text": r["text"], "resolved": bool(r["resolved"])} for r in items]
     return answer
+
+
+def _attempts(report_id):
+    """The report's publish attempts with their people, newest first - one query."""
+    return (ReportHistory.objects.select_related("user")
+            .filter(report_id=report_id)
+            .filter(Q(action__in=(PUBLISHED, PUBLISH_FAILED)) | Q(action__startswith=_OLD_FAILED_PREFIX))
+            .order_by("-created_at", "-id"))
+
+
+def publish_history(entity_id, report: Report) -> list[dict]:
+    """``[{at, user_name, action, details}]``, newest first: ``at`` in Hong Kong time (ISO),
+    ``user_name`` "First Last" (None when the row names nobody), ``action`` "published" or
+    "publish_failed", ``details`` a failure's ``[{text, resolved}]``. ``resolved`` is the re-check
+    (``annotate``) on the newest failed attempt while the report is still failed, else None - not
+    re-checked, so Xero is asked about one attempt at most."""
+    recheck = report.publishing_status == "failed"
+    history = []
+    for row in _attempts(report.id):
+        details = []
+        if row.action != PUBLISHED:
+            items = reason_items(row.action, row.new_value)
+            if recheck:
+                details = [{"text": r["text"], "resolved": bool(r["resolved"])}
+                           for r in annotate(entity_id, items, report_id=report.id)]
+                recheck = False
+            else:
+                details = [{"text": item["text"], "resolved": None} for item in items]
+        history.append({
+            "at": hk(row.created_at).isoformat() if row.created_at else None,
+            "user_name": display_name(row.user) if row.user else None,
+            "action": PUBLISHED if row.action == PUBLISHED else PUBLISH_FAILED,
+            "details": details,
+        })
+    return history

@@ -11,7 +11,9 @@
 
 ``REPORT_EDIT_OWN``. No draft for the day is 409 ``to: "opening"``; a rule's refusal about one input
 is 422 ``{error, field}``; one no input can fix (a negative cash on hand, a report no longer a draft)
-is 409 ``{error}``.
+is 409 ``{error}``. Both reads answer the report's ``edit_version`` and both saves carry it back; a
+save opened from an older one is 409 ``{error: "This step was already saved by {name} at {time}",
+saved, next}`` (owner's decisions doc R2, 2026-11-19).
 """
 
 from __future__ import annotations
@@ -24,8 +26,10 @@ from petty_cash.money import out
 from petty_cash.routes._input import (
     BAD_DATE,
     action_type,
+    already_saved,
     amount,
     json_body,
+    opened_version,
     query_day,
     require_edit,
 )
@@ -38,7 +42,13 @@ from petty_cash.services.cash import (
     save_deposit_and_count,
 )
 from petty_cash.services.denominations import denominations_for, denominations_payload
-from petty_cash.services.reports import currency_code, draft_payload, find_draft, progress_payload
+from petty_cash.services.reports import (
+    StepAlreadySaved,
+    currency_code,
+    draft_payload,
+    find_draft,
+    progress_payload,
+)
 
 router = Router()
 
@@ -84,14 +94,16 @@ def _body(request, what: str) -> dict:
 # --- Deposit -----------------------------------------------------------------------------------------
 
 
+def deposit_payload(entity_id, day) -> dict:
+    draft = _draft_for(entity_id, day)
+    return {"transaction_date": day.isoformat(), "currency_code": currency_code(entity_id),
+            "draft": draft_payload(draft), "edit_version": draft.edit_version, **_figures(draft)}
+
+
 @router.get("/reports/deposit")
 def deposit_page(request):
     require_edit(request)
-    entity_id = request.company.id
-    day = query_day(request, required=True)
-    draft = _draft_for(entity_id, day)
-    return {"transaction_date": day.isoformat(), "currency_code": currency_code(entity_id),
-            "draft": draft_payload(draft), **_figures(draft)}
+    return deposit_payload(request.company.id, query_day(request, required=True))
 
 
 @router.put("/reports/deposit")
@@ -109,27 +121,27 @@ def save_deposit_step(request):
     action = action_type(body)
     if action is None:
         raise Refused(BAD_ACTION, 422)
+    opened = opened_version(body)
     draft = _draft_for(entity_id, day)
     try:
-        draft = save_deposit(draft, request.auth_user, deposit, action)
+        draft = save_deposit(draft, request.auth_user, deposit, action, opened)
     except CashRefused as refused:
         raise _refused(refused) from None
+    except StepAlreadySaved as stale:
+        raise already_saved(stale, deposit_payload(entity_id, day), "cash_count") from None
     return progress_payload(draft, "cash_count" if action == "save_next" else "dashboard")
 
 
 # --- Cash Count --------------------------------------------------------------------------------------
 
 
-@router.get("/reports/cash-count")
-def cash_count_page(request):
-    require_edit(request)
-    entity_id = request.company.id
-    day = query_day(request, required=True)
+def cash_count_payload(entity_id, day) -> dict:
     draft = _draft_for(entity_id, day)
     return {
         "transaction_date": day.isoformat(),
         "currency_code": currency_code(entity_id),
         "draft": draft_payload(draft),
+        "edit_version": draft.edit_version,
         **_figures(draft),
         "denominations": denominations_payload(entity_id, draft.id),
         "safe_box_balance": out(draft.safe_box_balance),
@@ -139,6 +151,12 @@ def cash_count_page(request):
             "reason": draft.discrepancy_reason or "",
         },
     }
+
+
+@router.get("/reports/cash-count")
+def cash_count_page(request):
+    require_edit(request)
+    return cash_count_payload(request.company.id, query_day(request, required=True))
 
 
 @router.put("/reports/cash-count")
@@ -175,15 +193,19 @@ def save_cash_count_step(request):
         deposit = amount(body["bank_deposit"])
         if deposit is None:
             raise Refused(BAD_DEPOSIT, 422, field="bank_deposit")
+    opened = opened_version(body)
 
     draft = _draft_for(entity_id, day)
     try:
         if deposit is None:
-            draft = save_cash_count(draft, request.auth_user, counts, safe_box, reason, action)
+            draft = save_cash_count(draft, request.auth_user, counts, safe_box, reason, action, opened)
         else:
-            draft = save_deposit_and_count(draft, request.auth_user, deposit, counts, safe_box, reason, action)
+            draft = save_deposit_and_count(draft, request.auth_user, deposit, counts, safe_box, reason, action,
+                                           opened)
     except CashRefused as refused:
         raise _refused(refused) from None
+    except StepAlreadySaved as stale:
+        raise already_saved(stale, cash_count_payload(entity_id, day), "ending") from None
     answer = progress_payload(draft, "ending" if action == "save_next" else "dashboard")
     answer["discrepancy"] = {"amount": out(draft.discrepancy_amount), "kind": str(draft.discrepancy_type or "none")}
     return answer

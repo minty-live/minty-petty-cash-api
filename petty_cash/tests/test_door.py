@@ -72,6 +72,53 @@ def test_an_unknown_or_unapproved_person_is_unauthorized(client, shop):
     assert _get(client, shop.entity.id, headers(pending.id)).status_code == 401
 
 
+def test_a_token_whose_sign_in_has_ended_is_unauthorized(client, shop, hub_sessions):
+    # Signed out of Minty, or 60 minutes without activity (Phase 9): every app ends with it.
+    hub_sessions.end("gone")
+    resp = _get(client, shop.entity.id, headers(shop.owner.id, sid="gone"))
+
+    # The reason (owner, 2026-11-19): the app says "Your session has expired", never renews.
+    assert resp.status_code == 401
+    assert resp.json() == {"error": "unauthorized", "reason": "session_expired"}
+    assert resp["Access-Control-Allow-Origin"] == WEB
+
+
+def test_an_expired_token_whose_sign_in_has_ended_says_so(client, shop, hub_sessions):
+    # The usual case after 60 idle minutes: the token ran out AND the sign-in ended.
+    hub_sessions.end("gone")
+    resp = _get(client, shop.entity.id, headers(shop.owner.id, sid="gone", expires_in=-3600))
+
+    assert resp.status_code == 401
+    assert resp.json() == {"error": "unauthorized", "reason": "session_expired"}
+
+
+def test_an_expired_token_whose_sign_in_lives_is_renewed_quietly(client, shop, hub_sessions):
+    resp = _get(client, shop.entity.id, headers(shop.owner.id, sid="s1", expires_in=-3600))
+
+    assert resp.status_code == 401 and resp.json() == {"error": "unauthorized"}
+    assert hub_sessions.calls == ["s1"]
+
+
+def test_a_forged_token_naming_an_ended_sign_in_gives_no_reason(client, shop, hub_sessions):
+    hub_sessions.end("gone")
+    forged = headers(shop.owner.id, sid="gone", expires_in=-3600, secret="not-the-key-the-services-share-x")
+    resp = _get(client, shop.entity.id, forged)
+
+    assert resp.status_code == 401 and resp.json() == {"error": "unauthorized"}
+    assert hub_sessions.calls == []
+
+
+def test_a_live_sign_in_is_kept_alive_at_most_once_a_minute(client, shop, hub_sessions):
+    for _ in range(2):
+        assert _get(client, shop.entity.id, headers(shop.owner.id, sid="s1")).status_code == 200
+    assert hub_sessions.calls == ["s1"]
+
+
+def test_a_token_from_before_the_sid_is_accepted_until_it_expires(client, shop, hub_sessions):
+    assert _get(client, shop.entity.id, headers(shop.owner.id)).status_code == 200
+    assert hub_sessions.calls == []
+
+
 def test_a_company_they_do_not_belong_to_is_refused(client, shop):
     stranger = make_user("stranger@test.com")
 

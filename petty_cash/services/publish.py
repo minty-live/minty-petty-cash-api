@@ -63,6 +63,9 @@ STARTED = "Publishing to Xero. This can take a few minutes."
 ALREADY = "Publishing already in progress. Please wait..."
 DRAFT = "This report is still a draft. Submit the day before publishing it."
 RECONNECT = "I've lost access to your Xero account. Mind reconnecting it in Settings?"
+#: A contact archived in Xero, with no merge to follow (owner's decisions doc C4, 2026-11-19).
+ARCHIVED_IN_XERO = "{name} is archived in Xero. Restore it in Xero, or map it to another contact now."
+XERO_UNANSWERED = "Xero didn't answer just now. Mind trying again in a moment?"
 NO_TOKEN_SERVICE = "I couldn't reach Xero to start the publish. Try again in a moment."
 INCOMPLETE = "Xero settings incomplete. Please configure entity settings first."
 #: A company keeping its books in Minty with no Xero organisation (Xero optional, 2026-11-10).
@@ -76,8 +79,9 @@ HOLDING_MATCHES = ("first", "new_accounts", "new_org")
 #: archived it. (Suppliers aren't held: the publish re-creates one Xero doesn't know, as it always has.)
 STALE_ACCOUNT = ("{name} ({code}) isn't matched to your Xero organisation. Match it in Settings, under "
                  "Integration, then publish again.")
-ARCHIVED_ACCOUNT = ("{name} ({code}) is archived in Xero. Restore it in Xero or choose another account, "
-                    "then publish again.")
+#: The owner's decisions doc A3 (2026-11-19): an account Xero archived or removed is mapped again.
+ARCHIVED_ACCOUNT = ("{name} ({code}) is archived in Xero. Please check it in Xero, then map this account to the one you want to "
+                    "use (Settings, under General), and publish again.")
 #: A Petty Cash contact the day needs that Xero archived (2026-11-17): every publish of that step fails.
 ARCHIVED_CONTACT = ("{name}, your {label}, is archived in Xero. Restore it in Xero or choose another in Settings, "
                     "under Petty Cash Settings, then publish again.")
@@ -87,13 +91,15 @@ ACCOUNT_TIMEOUT = (5, 15)
 
 
 class PublishRefused(Exception):
-    """A publish that can't start: the sentence, the status, and whether Xero must be connected again."""
+    """A publish that can't start: the sentence, the status, whether Xero must be connected again,
+    and anything else the answer carries (``extra``: the archived contacts to map, C4)."""
 
-    def __init__(self, message: str, status: int, *, reconnect: bool = False):
+    def __init__(self, message: str, status: int, *, reconnect: bool = False, extra: dict | None = None):
         super().__init__(message)
         self.message = message
         self.status = status
         self.reconnect = reconnect
+        self.extra = extra or {}
 
 
 def _restored_in_xero(entity_id, org: str, access_token: str, account: AccountInfo) -> bool:
@@ -160,10 +166,51 @@ def stale_matches(entity: Entity, report: Report, access_token: str | None = Non
     return out
 
 
-def _archived_contacts(row: EntityPettycashSettings, report: Report) -> list[str]:
-    """The Petty Cash contacts THIS day sends to Xero that the sync found archived (``record_status``),
-    one sentence each, by the name Settings gives the field. Only the steps with an amount use one:
-    cash sales, a personal withdrawal, a counted difference."""
+def _contacts_sent(entity: Entity, report: Report) -> list[XeroContactSync]:
+    """The contacts this day sends to Xero: each expense line's supplier, and daily closing's
+    contacts of the steps with an amount (``_needed_contacts``)."""
+    ids = set(ReportExpense.objects.filter(report_id=report.id, contact_id__isnull=False)
+              .values_list("contact_id", flat=True))
+    row = EntityPettycashSettings.objects.filter(entity_id=entity.id).first()
+    if row is not None:
+        ids |= {cid for cid, _label in _needed_contacts(row, report) if cid}
+    return list(XeroContactSync.objects.filter(id__in=ids).order_by("name"))
+
+
+def archived_in_xero(entity: Entity, report: Report, access_token: str, org: str) -> list[dict]:
+    """The day's contacts Xero has archived (owner's decisions doc C4, 2026-11-19), asked of Xero
+    before anything is sent. One Xero merged into another follows it - relinked through
+    accounts-api, merged into the Minty contact already holding the kept one - with no prompt; one
+    archived with no merge comes back ``{id, name}`` for the person to restore in Xero or map now.
+    Minty never restores anything in Xero. Raises ``PublishRefused`` when Xero or accounts-api
+    can't be asked."""
+    from petty_cash.xero.contacts import RelinkRefused, XeroContactUnavailable, in_xero, relink
+
+    left = []
+    for contact in _contacts_sent(entity, report):
+        if not contact.xero_contact_id:
+            continue  # not in Xero yet: found or made at publish (C1)
+        try:
+            found = in_xero(access_token, org, contact.xero_contact_id)
+        except XeroContactUnavailable:
+            raise PublishRefused(XERO_UNANSWERED, 503) from None
+        if found is None or str(found.get("ContactStatus") or "ACTIVE").upper() != "ARCHIVED":
+            continue  # active, or lost (found or made again at publish)
+        target = found.get("MergedToContactID")
+        if target:
+            try:
+                relink(entity.id, contact.id, target, "merged_in_xero")
+            except RelinkRefused as refused:
+                raise PublishRefused(refused.message, refused.status) from None
+            logger.info("Publish: contact %s followed Xero's merge into %s", contact.id, target)
+            continue
+        left.append({"id": str(contact.id), "name": contact.name})
+    return left
+
+
+def _needed_contacts(row: EntityPettycashSettings, report: Report) -> list[tuple]:
+    """Daily closing's contacts THIS day sends, with the name Settings gives each field. Only the
+    steps with an amount use one: cash sales, a personal withdrawal, a counted difference."""
     needed = []
     if report.cashsale_total and report.cashsale_total > 0:
         needed.append((row.cash_sale_contact_id, "Cash Sales contact"))
@@ -171,6 +218,13 @@ def _archived_contacts(row: EntityPettycashSettings, report: Report) -> list[str
         needed.append((row.director_contact_id, "Director / Responsible person"))
     if report.discrepancy_amount and report.discrepancy_type in ("over", "short"):
         needed.append((row.discrepancy_contact_id, "Discrepancy contact"))
+    return needed
+
+
+def _archived_contacts(row: EntityPettycashSettings, report: Report) -> list[str]:
+    """The Petty Cash contacts THIS day sends to Xero that the sync found archived (``record_status``),
+    one sentence each, by the name Settings gives the field (``_needed_contacts``)."""
+    needed = _needed_contacts(row, report)
     archived = dict(XeroContactSync.objects.filter(id__in=[cid for cid, _ in needed if cid],
                                                    record_status="archived").values_list("id", "name"))
     return [ARCHIVED_CONTACT.format(name=archived[cid], label=label) for cid, label in needed if cid in archived]
@@ -237,6 +291,10 @@ def start_publish(entity_id, report: Report, person) -> dict:
     stale = stale_matches(entity, report, token.access_token)
     if stale:
         raise PublishRefused("\n".join(stale), 409)
+    archived = archived_in_xero(entity, report, token.access_token, str(token.xero_org_id))
+    if archived:
+        raise PublishRefused("\n".join(ARCHIVED_IN_XERO.format(name=c["name"]) for c in archived), 409,
+                             extra={"archived_contacts": archived})
 
     try:
         with transaction.atomic():

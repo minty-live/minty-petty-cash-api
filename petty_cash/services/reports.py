@@ -6,7 +6,9 @@ model's computed properties, ported:
 - a history line, written IN THE SAME TRANSACTION as the change it records (Flask's
   ``log_history`` committed on its own and swallowed its errors - here a failure fails the save);
 - the counted cash (``Report.actual_cash_total``), the onboarding defaults, the future-date rule;
-- the draft as every step's page reads it (``draft_payload``) and the company's currency code.
+- the draft as every step's page reads it (``draft_payload``) and the company's currency code;
+- the step version (``check_version`` / ``mark_saved``): a whole-step save opened from an older
+  ``edit_version`` is refused (owner's decisions doc R2, 2026-11-19); expense lines never touch it.
 """
 
 from __future__ import annotations
@@ -22,10 +24,12 @@ from minty_db.models import (
     Report,
     ReportCashCount,
     ReportHistory,
+    User,
 )
 
-from petty_cash.days import today
+from petty_cash.days import hk, today
 from petty_cash.money import cents
+from petty_cash.people import display_name
 
 
 def find_draft(entity_id, day, draft_id=None) -> Report | None:
@@ -85,6 +89,38 @@ def update_draft_progress(report: Report, action_type: str, current_section: str
     if current_section not in completed:
         completed.append(current_section)
     report.completed_sections = completed
+
+
+#: Two people on one report (owner's decisions doc R2, 2026-11-19): the first save of a step wins.
+STEP_SAVED = "This step was already saved by {name} at {time}"
+
+#: ``edit_version`` left out of a step save - see ``routes/_input.py::opened_version``.
+NOT_SENT = object()
+
+
+class StepAlreadySaved(Exception):
+    """A step save opened from an older ``edit_version``: nothing of it is applied."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
+
+
+def check_version(report: Report, opened) -> None:
+    """On the LOCKED row: a save opened from another version than the row's is refused with who
+    saved it and when (the report's ``updated_at``, Hong Kong time, as report history writes it).
+    ``NOT_SENT`` is not checked (a page from before the check)."""
+    if opened is NOT_SENT or opened == report.edit_version:
+        return
+    saver = User.objects.filter(id=report.saved_by_user_id).first() if report.saved_by_user_id else None
+    name = display_name(saver) if saver is not None else "someone else"
+    raise StepAlreadySaved(STEP_SAVED.format(name=name, time=f"{hk(report.updated_at):%H:%M}"))
+
+
+def mark_saved(report: Report, user) -> None:
+    """A step save applied: the next version, and who saved it (on the locked row)."""
+    report.edit_version = report.edit_version + 1
+    report.saved_by_user_id = user.id
 
 
 def log_history(report: Report, user, *, action: str, field_changed: str, old_value=None, new_value=None) -> None:

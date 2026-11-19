@@ -65,6 +65,7 @@ class FakeXero:
         self.calls: list[tuple[str, str, object]] = []
         self.answers: dict[tuple[str, str], object] = {}
         self.attached: dict[str, list[dict]] = {}  # transaction id -> its files
+        self.found: list[dict] = []  # Xero's answer to a contact name search
         self.n = 0
 
     def _path(self, url):
@@ -97,6 +98,8 @@ class FakeXero:
         if method == "GET" and path.startswith("Associations/"):
             files = self.attached.get(path.split("/", 1)[1])
             return _Response(200, files) if files else _Response(404, [])
+        if method == "GET" and path == "Contacts":
+            return _Response(200, {"Contacts": self.found})
         if method == "GET" and path.startswith("Contacts/"):
             return _Response(200, {"Contacts": [{"ContactID": path.split("/", 1)[1], "ContactStatus": "ACTIVE"}]})
         if path.startswith("BankTransactions"):
@@ -565,9 +568,12 @@ def test_an_unchanged_receipt_is_left_alone_and_a_changed_one_replaced_after(map
     assert order[0] == ("POST", "Files") and order[-1] == ("DELETE", "Files/file-old")
 
 
-def test_a_supplier_xero_lost_is_made_again_and_the_line_follows(mapped, xero):
+def test_a_supplier_xero_lost_is_made_again_on_the_same_row(mapped, xero):
+    """Xero no longer has the contact (404): it is looked for by name, else made again as a
+    supplier, and the new id goes on the same Minty contact - no second row."""
     report = _report(mapped, expense_total=10)
     line = _line(mapped, report, "Coffee", 10, contact="con-gone")
+    rows = XeroContactSync.objects.filter(entity_id=mapped.entity.id).count()
     xero.answers[("GET", "Contacts/con-gone")] = _Response(404, {})
 
     _run(mapped, report)
@@ -577,7 +583,73 @@ def test_a_supplier_xero_lost_is_made_again_and_the_line_follows(mapped, xero):
     line.refresh_from_db()
     new_id = XeroContactSync.objects.get(id=line.contact_id).xero_contact_id
     assert new_id != "con-gone"
+    assert XeroContactSync.objects.filter(entity_id=mapped.entity.id).count() == rows
     assert xero.sent("POST", "BankTransactions")[0]["bankTransactions"][0]["contact"] == {"contactID": new_id}
+
+
+# ---- contacts at publish (owner's decisions doc C1, 2026-11-19) --------------------------------
+
+
+def _own_line(shop, report, item, amount, name):
+    """A line whose supplier was made in Minty and isn't in Xero yet."""
+    line = _line(shop, report, item, amount)
+    own = XeroContactSync.objects.create(entity_id=shop.entity.id, name=name, source="user")
+    ReportExpense.objects.filter(id=line.id).update(contact_id=own.id)
+    return line, own
+
+
+def test_a_contact_xero_has_by_name_is_linked_at_publish_never_made(mapped, xero):
+    report = _report(mapped, expense_total=10)
+    _own_line(mapped, report, "Coffee", 10, "Kee Wah")
+    xero.found = [{"ContactID": "con-kee", "Name": "KEE  WAH", "ContactStatus": "ACTIVE"}]
+
+    report = _run(mapped, report)
+
+    assert report.publishing_status == "completed"
+    assert xero.sent("POST", "Contacts") == []
+    own = XeroContactSync.objects.get(entity_id=mapped.entity.id, name="Kee Wah")
+    assert (own.xero_contact_id, own.xero_org_id) == ("con-kee", ORG)
+    assert xero.sent("POST", "BankTransactions")[0]["bankTransactions"][0]["contact"] == {"contactID": "con-kee"}
+
+
+def test_a_contact_xero_hasnt_is_made_there_as_a_supplier_and_kept_on_the_same_row(mapped, xero):
+    report = _report(mapped, expense_total=10)
+    _own_line(mapped, report, "Coffee", 10, "Kee Wah")
+    rows = XeroContactSync.objects.filter(entity_id=mapped.entity.id).count()
+
+    _run(mapped, report)
+
+    assert xero.sent("POST", "Contacts") == [{"Contacts": [{"Name": "Kee Wah", "IsCustomer": False,
+                                                            "IsSupplier": True}]}]
+    own = XeroContactSync.objects.get(entity_id=mapped.entity.id, name="Kee Wah")
+    assert own.xero_contact_id and XeroContactSync.objects.filter(entity_id=mapped.entity.id).count() == rows
+    sent = xero.sent("POST", "BankTransactions")[0]["bankTransactions"][0]
+    assert sent["contact"] == {"contactID": own.xero_contact_id}
+
+
+def test_a_daily_closing_contact_not_in_xero_is_linked_too(mapped, xero):
+    """The cash sale contact made in Minty: its invoice names the Xero contact found by name, never
+    an empty ContactID."""
+    XeroContactSync.objects.filter(entity_id=mapped.entity.id, xero_contact_id="con-cash").update(
+        xero_contact_id=None, source="user")
+    xero.found = [{"ContactID": "con-walkin", "Name": "Cash Sale", "ContactStatus": "ACTIVE"}]
+    report = _report(mapped, cashsale_total=200)
+
+    _run(mapped, report)
+
+    invoice = xero.sent("PUT", "Invoices")[0]["Invoices"][0]
+    assert invoice["Contact"] == {"ContactID": "con-walkin"}
+
+
+def test_xero_not_answering_for_a_contact_fails_that_entry_never_posts_it_without_one(mapped, xero):
+    report = _report(mapped, expense_total=10)
+    _own_line(mapped, report, "Coffee", 10, "Kee Wah")
+    xero.answers[("GET", "Contacts")] = requests.ConnectionError("down")
+
+    report = _run(mapped, report)
+
+    assert report.publishing_status == "failed"
+    assert xero.sent("POST", "BankTransactions") == [] and xero.sent("POST", "Contacts") == []
 
 
 # ---- GET /reports/{id}/publishing-status -----------------------------------------------------
@@ -654,8 +726,8 @@ def test_an_account_archived_in_xero_is_refused_by_name(client, mapped, xero, th
     resp = _publish(client, mapped, report.id)
 
     assert resp.status_code == 409
-    assert resp.json() == {"error": "Account 429 (429) is archived in Xero. Restore it in Xero or choose another "
-                                    "account, then publish again."}
+    assert resp.json() == {"error": "Account 429 (429) is archived in Xero. Please check it in Xero, then map this "
+                                    "account to the one you want to use (Settings, under General), and publish again."}
     assert ("GET", "Accounts/acc-429", None) in xero.calls
 
 
@@ -812,3 +884,83 @@ def test_a_day_with_card_sales_and_no_cash_still_sends_its_line(mapped, xero):
     invoice, = xero.sent("PUT", "Invoices")
     assert [(li["AccountCode"], li["LineAmount"]) for li in invoice["Invoices"][0]["LineItems"]] == [("201", 50.0)]
     assert report.publishing_status == "completed"
+
+
+# ---- a contact archived in Xero (owner's decisions doc C4, 2026-11-19) -------------------------------
+
+
+def test_a_contact_xero_merged_follows_it_with_no_prompt(client, mapped, xero, threads, monkeypatch):
+    from petty_cash.xero import contacts
+
+    report = _report(mapped, expense_total=10)
+    line = _line(mapped, report, "Coffee", 10, contact="con-old")
+    xero.answers[("GET", "Contacts/con-old")] = _Response(200, {"Contacts": [
+        {"ContactID": "con-old", "ContactStatus": "ARCHIVED", "MergedToContactID": "con-kept"}]})
+    relinked = []
+    monkeypatch.setattr(contacts, "relink", lambda *args, **kw: relinked.append(args) or {"merged": False})
+
+    resp = _publish(client, mapped, report.id)
+
+    assert resp.status_code == 202, resp.json()
+    assert relinked == [(mapped.entity.id, line.contact_id, "con-kept", "merged_in_xero")]
+
+
+def test_a_contact_archived_with_no_merge_asks_and_sends_nothing(client, mapped, xero, threads):
+    report = _report(mapped, expense_total=10)
+    line = _line(mapped, report, "Coffee", 10, contact="con-gone")
+    xero.answers[("GET", "Contacts/con-gone")] = _Response(200, {"Contacts": [
+        {"ContactID": "con-gone", "ContactStatus": "ARCHIVED"}]})
+
+    resp = _publish(client, mapped, report.id)
+
+    assert resp.status_code == 409
+    assert resp.json() == {
+        "error": "ABC Supplies is archived in Xero. Restore it in Xero, or map it to another contact now.",
+        "archived_contacts": [{"id": str(line.contact_id), "name": "ABC Supplies"}]}
+    assert threads == [] and xero.sent("POST", "Contacts") == []  # Minty never restores in Xero
+
+
+def test_xero_not_answering_the_contact_check_stops_the_start(client, mapped, xero, threads):
+    report = _report(mapped, expense_total=10)
+    _line(mapped, report, "Coffee", 10, contact="con-x")
+    xero.answers[("GET", "Contacts/con-x")] = requests.ConnectionError("down")
+
+    resp = _publish(client, mapped, report.id)
+
+    assert resp.status_code == 503 and threads == []
+
+
+def test_the_xero_contacts_a_publisher_can_map_to_are_the_active_copies(client, mapped):
+    from minty_db.models import XeroContact
+
+    XeroContact.objects.create(entity_id=mapped.entity.id, xero_org_id=ORG, xero_guid="x-b", name="Beta",
+                               status="ACTIVE")
+    XeroContact.objects.create(entity_id=mapped.entity.id, xero_org_id=ORG, xero_guid="x-a", name="Alpha",
+                               status="ACTIVE")
+    XeroContact.objects.create(entity_id=mapped.entity.id, xero_org_id=ORG, xero_guid="x-z", name="Gone",
+                               status="ARCHIVED")
+    resp = client.get(url(mapped.entity.id, "/xero/contacts"), headers=headers(mapped.owner.id))
+    assert resp.json() == {"contacts": [{"xero_contact_id": "x-a", "name": "Alpha"},
+                                        {"xero_contact_id": "x-b", "name": "Beta"}]}
+
+
+def test_mapping_a_contact_now_relinks_it_through_accounts_api(client, mapped, monkeypatch):
+    from minty_db.models import XeroContact
+
+    from petty_cash.xero import contacts
+
+    XeroContact.objects.create(entity_id=mapped.entity.id, xero_org_id=ORG, xero_guid="x-a", name="Alpha Ltd",
+                               status="ACTIVE")
+    kee = XeroContactSync.objects.create(entity_id=mapped.entity.id, name="Kee Wah", xero_contact_id="x-old")
+    asked = []
+    monkeypatch.setattr(contacts, "relink", lambda *args: asked.append(args) or {"merged": False,
+                                                                               "contact_id": str(kee.id)})
+
+    def link(body):
+        return client.post(url(mapped.entity.id, f"/contacts/{kee.id}/xero-link"), body,
+                           content_type="application/json", headers=headers(mapped.owner.id))
+
+    assert link({"xero_contact_id": "x-unknown"}).status_code == 422, "only one of the company's Xero contacts"
+    resp = link({"xero_contact_id": "x-a"})
+    assert (resp.status_code, resp.json()["message"]) == (200, "Kee Wah now uses Alpha Ltd in Xero.")
+    assert asked == [(mapped.entity.id, kee.id, "x-a", "user", mapped.owner.id)]

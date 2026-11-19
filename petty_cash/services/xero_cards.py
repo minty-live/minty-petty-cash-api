@@ -27,6 +27,7 @@ import logging
 import requests
 from django.conf import settings
 from django.db import transaction
+from django.db.models.functions import Lower
 from minty_db.models import (
     AccountInfo,
     Entity,
@@ -107,12 +108,13 @@ def is_live(entity: Entity) -> bool:
 
 
 def refresh_from_xero(entity: Entity) -> None:
-    """The company's accounts and contacts from Xero, through accounts-api. Logged, never raised:
-    the cards still open from what is stored."""
+    """The company's accounts and contacts from Xero, through accounts-api - read only, at most
+    once every 2 minutes per company (``throttle``; owner's decisions doc C2, 2026-11-19). Logged,
+    never raised: the cards still open from what is stored."""
     try:
         response = requests.post(f"{settings.ACCOUNTS_API_URL}/api/internal/xero/sync",
                                  headers=assertion_headers(service_assertion(SYNC_SCOPE, entity.id)),
-                                 timeout=SYNC_TIMEOUT)
+                                 json={"throttle": True}, timeout=SYNC_TIMEOUT)
     except requests.RequestException as exc:
         logger.warning("Xero settings: the sync could not be asked for company %s: %s", entity.id, exc)
         return
@@ -138,8 +140,12 @@ def _account(row: AccountInfo) -> dict:
 
 
 def _contact(row: XeroContactSync) -> dict:
+    # named by ``public_id`` - its Xero id, else its own (one contact list, owner's decisions doc C3,
+    # 2026-11-19: a contact made in Minty is offered too, and goes to Xero at its first publish);
     # archived by the sync (Xero archived it): a publish to it fails (2026-11-17)
-    return {"ContactID": row.xero_contact_id, "Name": row.name, "archived": row.record_status == "archived"}
+    from petty_cash.services.expenses import public_id
+
+    return {"ContactID": public_id(row), "Name": row.name, "archived": row.record_status == "archived"}
 
 
 def choices(entity_id) -> dict:
@@ -148,8 +154,9 @@ def choices(entity_id) -> dict:
     accounts = [_account(a) for a in AccountInfo.objects.filter(entity_id=entity_id, status="ACTIVE")]
     lists = {name: [a for a in accounts if keep(a["Type"])] for name, keep in _LISTS.items()}
     # an archived contact is offered only as the saved choice (added below), marked
-    lists["contacts"] = [_contact(c) for c in XeroContactSync.objects.filter(entity_id=entity_id)
-                         .exclude(record_status="archived")]
+    lists["contacts"] = [_contact(c) for c in XeroContactSync.objects.filter(entity_id=entity_id,
+                                                                              merged_into__isnull=True)
+                         .exclude(record_status="archived").order_by(Lower("name"))]
     row = EntityPettycashSettings.objects.filter(entity_id=entity_id).first()
     saved = {}
     for key, _label, kind, listed, column in FIELDS:
@@ -261,7 +268,10 @@ def save_mapping(entity: Entity, values: dict, optional=(), skip=()) -> list[str
             resolved[column] = None
             continue
         if kind == "contact":
+            # by ``public_id``: its Xero id, else (a contact made in Minty, C3) its own id
             row = XeroContactSync.objects.filter(entity_id=entity.id, xero_contact_id=value).first()
+            if row is None and _is_uuid(value):
+                row = XeroContactSync.objects.filter(entity_id=entity.id, id=value, xero_contact_id__isnull=True).first()
         else:
             row = (AccountInfo.objects.filter(entity_id=entity.id, xero_account_id=value).first()
                    or AccountInfo.objects.filter(entity_id=entity.id, xero_code=value).first())
@@ -486,3 +496,13 @@ def answer(entity_id, action: str, body, *, may_edit: bool) -> tuple[dict, int]:
         return {"error": "Some choices haven't synced from Xero yet: " + "; ".join(unresolved)
                          + ". Try again once the Xero sync has finished."}, 409
     return {**payload(entity, may_edit), "message": "Account mapping saved.", "first_save": first_save}, 200
+
+
+def _is_uuid(value) -> bool:
+    import uuid
+
+    try:
+        uuid.UUID(str(value))
+    except ValueError:
+        return False
+    return True

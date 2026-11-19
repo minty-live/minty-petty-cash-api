@@ -10,6 +10,7 @@ from core.exceptions import Refused
 from core.policy import Permission, has_permission
 from petty_cash.days import parse_day
 from petty_cash.money import MAX_AMOUNT, cents
+from petty_cash.services.reports import NOT_SENT
 
 NOT_ALLOWED = "You do not have permission to edit reports for this entity."
 BAD_DATE = "That date doesn't look quite right! Please check the format and try again."
@@ -55,6 +56,30 @@ def amount(value, *, allow_zero=True) -> Decimal | None:
     if not number.is_finite() or number < 0 or number > MAX_AMOUNT or (not allow_zero and number == 0):
         return None
     return cents(number)
+
+
+BAD_VERSION = "This step's version doesn't look right. Reload the page, then save again."
+
+
+def opened_version(body: dict, *, nullable: bool = False):
+    """The ``edit_version`` the step was opened from (owner's decisions doc R2, 2026-11-19): a whole
+    number of 0 or more; ``NOT_SENT`` when the key is absent - a page from before the check (the
+    redesign Worker, an old bundle during a deploy), saved unchecked as before; None only where
+    ``nullable`` (Opening read before the day had a report). Anything else is 422."""
+    if "edit_version" not in body:
+        return NOT_SENT
+    value = body["edit_version"]
+    if value is None and nullable:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise Refused(BAD_VERSION, 422)
+    return value
+
+
+def already_saved(refusal, saved: dict, next_step: str) -> Refused:
+    """R2's 409 (``StepAlreadySaved``): the sentence, the step's values as its read answers them
+    now (``saved``) and the step the person goes on to (``next``)."""
+    return Refused(refusal.message, 409, saved=saved, next=next_step)
 
 
 def action_type(body: dict) -> str | None:

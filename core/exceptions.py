@@ -2,7 +2,8 @@
 
 THE BODY IS ``{"error": "<sentence>"}`` - a sentence minty-petty-cash-web shows as it stands -
 except ``unauthorized`` (401), which the app answers by going back through Flask's
-``/handoff/petty-cash-web`` for a fresh token. Some refusals add a key the app routes on:
+``/handoff/petty-cash-web`` for a fresh token - or, with ``"reason": "session_expired"`` (the
+sign-in behind the token has ended), by saying the session has expired. Some refusals add a key the app routes on:
 ``to`` (where to go: ``opening``, ``dashboard``, ...), ``field`` (the input it is about),
 ``report_id``. A 500 says one generic sentence; the detail goes to the log, never the caller.
 """
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import logging
 
+from minty_shared import tokens
 from ninja.errors import AuthenticationError, HttpError
 from ninja.errors import ValidationError as SchemaValidationError
 
@@ -37,7 +39,10 @@ class Refused(Exception):
 def register_exception_handlers(api):
     @api.exception_handler(AuthenticationError)
     def on_unauthorized(request, exc):
-        return api.create_response(request, {"error": UNAUTHORIZED}, status=401)
+        # ``reason: session_expired`` when the sign-in behind the token has ended (core/auth.py).
+        return api.create_response(
+            request, {"error": UNAUTHORIZED, **tokens.unauthorized_reason(request)}, status=401
+        )
 
     @api.exception_handler(Refused)
     def on_refused(request, exc: Refused):

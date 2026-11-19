@@ -54,15 +54,17 @@ class Xero:
         self.listed = True
         self.sync_answer = _Resp(200, {"accounts": None, "contacts": None})
         self.syncs: list[dict] = []
+        self.sync_bodies: list = []
         self.token_problem: XeroTokenUnavailable | None = None
 
     def get(self, url, headers=None, timeout=None, **_):
         assert url == "https://api.xero.com/connections"
         return _Resp(200, [{"tenantId": ORG}] if self.listed else [])
 
-    def post(self, url, headers=None, timeout=None, **_):
+    def post(self, url, headers=None, timeout=None, json=None, **_):
         assert url == f"{settings.ACCOUNTS_API_URL}/api/internal/xero/sync"
         self.syncs.append(headers)
+        self.sync_bodies.append(json)
         if isinstance(self.sync_answer, Exception):
             raise self.sync_answer
         return self.sync_answer
@@ -217,6 +219,8 @@ def test_the_sync_is_asked_with_this_companys_assertion(client, lists, xero):
     assertion = xero.syncs[0]["Authorization"].removeprefix("Bearer ")
     claims = jwt.decode(assertion, settings.SECRET_KEY, algorithms=["HS256"])
     assert (claims["scope"], claims["entity_id"]) == ("xero-sync", str(lists.entity.id))
+    # opening Settings reads at most once every 2 minutes (owner's decisions doc C2, 2026-11-19)
+    assert xero.sync_bodies[0] == {"throttle": True}
 
 
 @pytest.mark.parametrize("failure", [requests.ConnectionError("down"), _Resp(500, {})])
@@ -358,3 +362,21 @@ def test_an_unticked_sales_account_hides_its_code_and_keeps_it(client, lists, xe
     assert call(client, lists, "put", "/settings/xero/mapping", sent).status_code == 200
     saved = EntityPettycashSettings.objects.get(entity_id=lists.entity.id)
     assert saved.delivery_sale_account_id is not None, "a hidden code is kept for when it comes back"
+
+
+def test_a_live_company_also_offers_its_minty_made_contacts_and_saves_one(client, lists, xero):
+    """One contact list (the owner's decisions doc C3, 2026-11-19): a contact made in Minty that
+    isn't in Xero yet is offered beside the synced ones, named by its own id, and saved by it; it goes
+    to Xero at its first publish (C1). A merged-away contact is never offered."""
+    own = XeroContactSync.objects.create(entity_id=lists.entity.id, name="Walk-in", source="user")
+    kept = XeroContactSync.objects.get(xero_contact_id="con-1")
+    XeroContactSync.objects.create(entity_id=lists.entity.id, name="Old Walk-in", source="user",
+                                   record_status="archived", merged_into_id=kept.id)
+
+    body = call(client, lists, "get", "/settings/xero").json()
+    assert _field(body, "cashsale_contact")["options"] == [{"id": "con-1", "name": "Cash Customer"},
+                                                         {"id": str(own.id), "name": "Walk-in"}]
+
+    resp = call(client, lists, "put", "/settings/xero/mapping", {**MAPPING, "cashsale_contact": str(own.id)})
+    assert resp.status_code == 200, resp.json()
+    assert EntityPettycashSettings.objects.get(entity_id=lists.entity.id).cash_sale_contact_id == own.id

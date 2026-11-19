@@ -267,6 +267,14 @@ def edit_report_line(request, report_id: str, line_id: str):
     if len(receipts) > 1:
         raise Refused("Attach one receipt per expense.", 422)
     report = _report(request, report_id)
+    # DUP1 (owner's decisions doc, 2026-11-19): a new supplier that makes this line repeat another
+    # (same day and amount) is asked about first
+    if form.get("supplier_id"):
+        from petty_cash.routes.expenses import _ask_about_duplicates
+        from petty_cash.services.expenses import find_supplier
+
+        _ask_about_duplicates(form, report, find_supplier(request.company.id, form.get("supplier_id")),
+                              line.amount, exclude_id=line.id)
     return _edit(request, report, lambda r: edit_expense_line(
         r, line, request.auth_user, description=form.get("description") if "description" in form else None,
         supplier_id=form.get("supplier_id") or None, account_id=form.get("account_id") or None, receipts=receipts,
@@ -281,11 +289,62 @@ def publish(request, report_id: str):
     try:
         answer = start_publish(request.company.id, report, request.auth_user)
     except PublishRefused as refused:
-        body = {"error": refused.message}
+        body = {"error": refused.message, **refused.extra}
         if refused.reconnect:
             body["reconnect"] = True
         return JsonResponse(body, status=refused.status)
     return JsonResponse(answer, status=202)
+
+
+# ---- "map it to another contact now" (owner's decisions doc C4, 2026-11-19) --------------------------
+
+
+@router.get("/xero/contacts")
+def xero_contacts(request):
+    """The contacts the company's Xero has (the stored active copies), A to Z - what a contact
+    archived in Xero can be mapped to at publish. ``REPORT_PUBLISH``: the person publishing maps."""
+    from minty_db.models import Entity, XeroContact
+
+    entity = Entity.objects.get(id=request.company.id)
+    if not has_permission(request.auth_user, Permission.REPORT_PUBLISH, entity.id):
+        raise Refused("You don't have permission to publish reports for this company.", 403)
+    rows = XeroContact.objects.filter(entity_id=entity.id, xero_org_id=str(entity.xero_org_id or ""),
+                                      status="ACTIVE").order_by("name")
+    return JsonResponse({"contacts": [{"xero_contact_id": r.xero_guid, "name": r.name} for r in rows]})
+
+
+@router.post("/contacts/{contact_id}/xero-link")
+def map_contact(request, contact_id: str):
+    """``{xero_contact_id}``: the Minty contact now uses that Xero contact (one of the company's
+    active copies) - merged into the Minty contact already holding it, if any (accounts-api's relink,
+    the one implementation). Minty never restores anything in Xero."""
+    from minty_db.models import Entity, XeroContact, XeroContactSync
+
+    from petty_cash.xero.contacts import RelinkRefused, relink
+
+    entity = Entity.objects.get(id=request.company.id)
+    if not has_permission(request.auth_user, Permission.REPORT_PUBLISH, entity.id):
+        raise Refused("You don't have permission to publish reports for this company.", 403)
+    try:
+        contact = XeroContactSync.objects.filter(entity_id=entity.id, id=uuid.UUID(contact_id),
+                                                 record_status="active").first()
+    except ValueError:
+        contact = None
+    if contact is None:
+        raise Refused("That contact isn't in this company. Reload the page and try again.", 404)
+    body = json_body(request)
+    guid = body.get("xero_contact_id") if isinstance(body, dict) else None
+    copy = (XeroContact.objects.filter(entity_id=entity.id, xero_org_id=str(entity.xero_org_id or ""),
+                                       xero_guid=guid, status="ACTIVE").first() if isinstance(guid, str) else None)
+    if copy is None:
+        raise Refused("Choose one of your Xero contacts to use.", 422)
+    try:
+        answer = relink(entity.id, contact.id, copy.xero_guid, "user", request.auth_user.id)
+    except RelinkRefused as refused:
+        raise Refused(refused.message, refused.status) from None
+    said = (f"{contact.name} merged into the contact that already uses {copy.name}." if answer.get("merged")
+            else f"{contact.name} now uses {copy.name} in Xero.")
+    return JsonResponse({"message": said, "contact_id": answer.get("contact_id")})
 
 
 @router.get("/reports/{report_id}/publishing-status")

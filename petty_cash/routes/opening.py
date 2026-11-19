@@ -1,16 +1,21 @@
 """The report wizard's Opening step - Flask's ``petty_cash_api/routes/opening.py``.
 
 - ``GET /reports/opening?transaction_date=``: the day's draft, or what the day opens from.
-- ``PUT /reports/opening`` ``{transaction_date, cash_addition, withdrawal, action}``: the save. The
-  opening balance is the server's own "Starting Cash Balance" (a first report's: the onboarding
-  balance) - never taken from the client.
+- ``PUT /reports/opening`` ``{transaction_date, cash_addition, withdrawal, action, edit_version}``: the
+  save. The opening balance is the server's own "Starting Cash Balance" (a first report's: the
+  onboarding balance) - never taken from the client. ``edit_version`` is the read's (null when the
+  day had no report then).
 
 A date rule's refusal is 409 ``{error, to: "dashboard"}``; a negative balance 409
-``{error, to: "opening"}``; bad input 422. ``REPORT_EDIT_OWN`` throughout.
+``{error, to: "opening"}``; bad input 422. Two people (owner's decisions doc R1/R2, 2026-11-19):
+the day's report started by someone else first is 409 ``{error: "A report for this date has already
+been started", report_id, to}``; a save opened from an older version is 409 ``{error: "This step was
+already saved by {name} at {time}", saved, next: "sales"}``. ``REPORT_EDIT_OWN`` throughout.
 """
 
 from __future__ import annotations
 
+from minty_db.enums import ReportStatus
 from ninja import Router
 
 from core.exceptions import Refused
@@ -19,14 +24,17 @@ from petty_cash.money import out
 from petty_cash.routes._input import (
     BAD_DATE,
     action_type,
+    already_saved,
     amount,
     json_body,
+    opened_version,
     query_day,
     require_edit,
 )
 from petty_cash.services.opening import (
     NEGATIVE,
     OpeningRefused,
+    ReportStarted,
     first_report_opening,
     new_report_date_problem,
     opening_state,
@@ -34,6 +42,7 @@ from petty_cash.services.opening import (
     starting_cash_balance,
 )
 from petty_cash.services.reports import (
+    StepAlreadySaved,
     currency_code,
     draft_payload,
     progress_payload,
@@ -55,6 +64,8 @@ def opening_payload(entity_id, selected) -> dict:
         "transaction_date": day.isoformat(),
         "currency_code": currency_code(entity_id),
         "draft": draft_payload(draft),
+        # the version a save carries back (R2); null before the day has a report
+        "edit_version": draft.edit_version if draft is not None else None,
         "starting_cash_balance": out(starting_cash_balance(state)),
         "yesterday_closing_balance": out(state["yesterday_closing_balance"]),
         "safebox_balance": out(state["safebox_balance"]),
@@ -85,7 +96,8 @@ def _valid_save(body) -> dict:
     action = action_type(body)
     if action is None:
         raise Refused("Choose Save & Next or Save & Exit.", 422)
-    return {"day": day, "cash_addition": addition, "withdrawal": withdrawal, "action_type": action}
+    return {"day": day, "cash_addition": addition, "withdrawal": withdrawal, "action_type": action,
+            "opened": opened_version(body, nullable=True)}
 
 
 @router.put("/reports/opening")
@@ -112,8 +124,15 @@ def save_opening_step(request):
 
     try:
         draft = save_opening(
-            entity_id, request.auth_user, day, opening, save["cash_addition"], save["withdrawal"], save["action_type"]
+            entity_id, request.auth_user, day, opening, save["cash_addition"], save["withdrawal"], save["action_type"],
+            save["opened"],
         )
     except OpeningRefused as refused:
         raise Refused(refused.message, 409, to=refused.to) from None
+    except ReportStarted as started:
+        theirs = started.report
+        to = (theirs.current_section or "opening") if theirs.status == ReportStatus.DRAFT else "dashboard"
+        raise Refused(started.message, 409, report_id=str(theirs.id), to=to) from None
+    except StepAlreadySaved as stale:
+        raise already_saved(stale, opening_payload(entity_id, day), "sales") from None
     return progress_payload(draft, "sales" if save["action_type"] == "save_next" else "dashboard")

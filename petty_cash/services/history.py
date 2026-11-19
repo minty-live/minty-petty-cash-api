@@ -1,8 +1,8 @@
 """Report history's list - Flask's ``blueprints/report/services/history_query.py::
 get_entity_report_history``, ported: one page of a company's reports, newest day first, filtered by
 one Status pill and a date range, counted and cut in SQL. A failed report's publish reasons are not
-worked out here (they may ask Xero): ``services/publish_reasons.py`` works them out, for the failed
-rows on the page only.
+on the list (they may ask Xero): they are the report's History (``GET /reports/{id}/history``,
+``services/publish_reasons.publish_history``; owner's H1, 2026-11-19).
 """
 
 from __future__ import annotations

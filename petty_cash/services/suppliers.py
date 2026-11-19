@@ -16,13 +16,12 @@ from __future__ import annotations
 
 import logging
 
-import requests
-from django.conf import settings
 from django.db import IntegrityError, transaction
 from minty_db.models import Entity, XeroContact, XeroContactSync
 
 from core.xero_tokens import XeroTokenUnavailable, xero_token
 from petty_cash.services.xero_settings import minty_on_its_own
+from petty_cash.xero.contacts import XeroContactUnavailable, found_or_made
 
 logger = logging.getLogger("petty-cash-api")
 
@@ -31,8 +30,6 @@ NO_ENTRY = "Xero wouldn't let me in. Could you ask an admin to reconnect it?"
 NOT_ADDED = "I couldn't add that contact to Xero. Mind trying again?"
 NO_ID = "Xero didn't tell me which contact it created. Mind trying again?"
 NO_TOKEN_SERVICE = "I couldn't reach Xero just now. Mind trying again in a moment?"
-NOT_BACK = "I couldn't bring that contact back in Xero. Mind trying again?"
-WAITS_FOR_XERO = "{name} was archived in Xero. Could you ask an admin to reconnect Xero to bring it back?"
 #: ``xero_contact_sync.name``
 MAX_NAME = 150
 
@@ -73,30 +70,6 @@ def _access_token(entity_id) -> str:
         raise SupplierRefused(NO_TOKEN_SERVICE, 503) from None
 
 
-def _active_in_xero(entity: Entity, guid: str) -> None:
-    """Set an archived Xero contact ACTIVE again, and Minty's copy of it with it."""
-    token = _access_token(entity.id)
-    try:
-        response = requests.post(
-            f"{settings.XERO_API_BASE_URL}/Contacts",
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
-                     "Content-Type": "application/json", "Xero-Tenant-Id": str(entity.xero_org_id)},
-            json={"Contacts": [{"ContactID": guid, "ContactStatus": "ACTIVE"}]},
-            timeout=30,
-        )
-    except requests.RequestException as exc:
-        logger.error("Xero unreachable bringing contact %s back for company %s: %s", guid, entity.id, exc)
-        raise SupplierRefused(NOT_BACK) from None
-    if response.status_code in (401, 403):
-        raise SupplierRefused(NO_ENTRY)
-    if response.status_code not in (200, 201):
-        logger.error("Xero refused bringing contact %s back for company %s: %s %s", guid, entity.id,
-                     response.status_code, response.text[:500])
-        raise SupplierRefused(NOT_BACK)
-    XeroContact.objects.filter(entity_id=entity.id, xero_org_id=str(entity.xero_org_id), xero_guid=guid).update(
-        status="ACTIVE")
-
-
 def _brought_back(entity: Entity, name: str, offline: bool) -> XeroContactSync | None:
     """The supplier the company deleted with this name, brought back; None when there is none."""
     gone = sorted((c for c in XeroContactSync.objects.filter(entity_id=entity.id, record_status="archived",
@@ -104,10 +77,8 @@ def _brought_back(entity: Entity, name: str, offline: bool) -> XeroContactSync |
                   key=lambda c: not c.xero_contact_id)
     if gone:
         row = gone[0]
-        if row.xero_contact_id:
-            if offline:
-                raise SupplierRefused(WAITS_FOR_XERO.format(name=row.name))
-            _active_in_xero(entity, row.xero_contact_id)
+        # Minty never restores anything in the customer's Xero (owner's decisions doc C4,
+        # 2026-11-19): the row comes back here; if Xero still has it archived, publish asks
         XeroContactSync.objects.filter(id=row.id).update(record_status="active")
         row.record_status = "active"
         logger.info("Supplier %s brought back for company %s", row.id, entity.id)
@@ -120,7 +91,7 @@ def _brought_back(entity: Entity, name: str, offline: bool) -> XeroContactSync |
                  .exclude(status="ACTIVE") if _key(c.name) == _key(name) and c.xero_guid not in held), None)
     if copy is None:
         return None
-    _active_in_xero(entity, copy.xero_guid)
+    # linked as it stands, not restored (C4): publish asks about an archived one
     row = XeroContactSync.objects.create(entity_id=entity.id, xero_contact_id=copy.xero_guid,
                                          xero_org_id=entity.xero_org_id, name=copy.name[:MAX_NAME],
                                          xero_contact_link_id=copy.id)
@@ -156,36 +127,18 @@ def create_supplier(entity_id, name: str) -> XeroContactSync:
                                              xero_contact_link_id=copy.id)
         logger.info("Supplier %s linked to Xero's contact of its name for company %s", row.id, entity_id)
         return row
+    # Added while connected, it is made in both (owner's decisions doc C5, 2026-11-19): Xero's contact
+    # of the name (searched live, case and extra spaces ignored) is linked, else it is made there as a
+    # supplier - never a twin in Xero.
     token = _access_token(entity_id)
     try:
-        response = requests.post(
-            f"{settings.XERO_API_BASE_URL}/Contacts",
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
-                     "Content-Type": "application/json", "Xero-Tenant-Id": str(entity.xero_org_id)},
-            json={"Contacts": [{"Name": name, "IsCustomer": True, "IsSupplier": False}]},
-            timeout=30,
-        )
-    except requests.RequestException as exc:
-        logger.error("Xero unreachable adding a contact for company %s: %s", entity_id, exc)
-        raise SupplierRefused(NOT_ADDED) from None
-    if response.status_code in (401, 403):
-        logger.error("Xero refused the token adding a contact for company %s: %s", entity_id, response.status_code)
-        raise SupplierRefused(NO_ENTRY)
-    if response.status_code not in (200, 201):
-        logger.error("Xero refused a new contact for company %s: %s %s", entity_id, response.status_code,
-                     response.text[:500])
-        raise SupplierRefused(NOT_ADDED)
-    try:
-        contacts = (response.json() or {}).get("Contacts") or []
-    except ValueError:
-        contacts = []
-    if not contacts:
-        raise SupplierRefused(NOT_ADDED)
-    xero_contact_id = contacts[0].get("ContactID")
-    if not xero_contact_id:
-        logger.error("Xero created a contact for company %s without a ContactID", entity_id)
-        raise SupplierRefused(NO_ID)
-    created_name = (contacts[0].get("Name") or name)[:MAX_NAME]
+        made = found_or_made(token, entity.xero_org_id, " ".join(name.split()))
+    except XeroContactUnavailable as unavailable:
+        if unavailable.status in (401, 403):
+            raise SupplierRefused(NO_ENTRY) from None
+        raise SupplierRefused(NO_ID if unavailable.no_id else NOT_ADDED) from None
+    xero_contact_id = made["ContactID"]
+    created_name = " ".join(name.split())[:MAX_NAME]
 
     with transaction.atomic():
         row = XeroContactSync.objects.filter(entity_id=entity_id, xero_contact_id=xero_contact_id).first()

@@ -5,6 +5,11 @@ Flask's rules, quirks included: the opening chains off the previous report WHATE
 and is saved at, the onboarding balance and may not be dated before onboarding's start date; a
 save on a draft does not recompute its closing balance; Save & Next moves an advanced draft back
 to Sales. A new day goes one at a time after the last submitted report. "Today" is Hong Kong's.
+
+Two people starting the same day (owner's decisions doc R1, 2026-11-19): the first creates the report;
+the second is refused with ``REPORT_STARTED`` and nothing of theirs is written - whether the report
+was there when the save began (their page was read before it existed) or it lands between the
+check and the insert (the ``report_entity_date_key`` unique key turns the insert away).
 """
 
 from __future__ import annotations
@@ -12,26 +17,30 @@ from __future__ import annotations
 from datetime import timedelta
 from decimal import Decimal
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from minty_db.enums import ReportStatus
 from minty_db.models import Report
 
 from petty_cash.days import today
 from petty_cash.money import cents
 from petty_cash.services.reports import (
+    NOT_SENT,
     actual_cash_total,
+    check_version,
     find_draft,
     first_report_defaults,
     future_date_error,
     last_submitted,
     live_drafts,
     log_history,
+    mark_saved,
     previous_report,
     submitted_report_for,
     update_draft_progress,
 )
 
 NEGATIVE = "Hmm, it looks like your cash balance is negative. Could you fix that first?"
+REPORT_STARTED = "A report for this date has already been started"
 
 
 class OpeningRefused(Exception):
@@ -41,6 +50,15 @@ class OpeningRefused(Exception):
         super().__init__(message)
         self.message = message
         self.to = to
+
+
+class ReportStarted(Exception):
+    """Someone else started the day's report first (R1): ``report`` is theirs."""
+
+    def __init__(self, report: Report):
+        super().__init__(REPORT_STARTED)
+        self.message = REPORT_STARTED
+        self.report = report
 
 
 def first_report_date_error(day, today_, entity_id) -> str | None:
@@ -171,15 +189,20 @@ def _history_number(value: Decimal) -> str:
 
 @transaction.atomic
 def save_opening(entity_id, user, day, opening_balance: Decimal, cash_addition: Decimal, withdrawal,
-                 action_type: str) -> Report:
+                 action_type: str, opened=NOT_SENT) -> Report:
     """Write the Opening step onto the day's draft, creating it (after the date rules) when there
-    is none. Raises ``OpeningRefused``. One transaction, history included."""
+    is none. ``opened`` is the ``edit_version`` the page was read at - None when the day had no
+    report then. Raises ``OpeningRefused``, ``ReportStarted`` (R1) and ``StepAlreadySaved`` (R2).
+    One transaction, history included."""
     opening_balance, cash_addition = cents(opening_balance), cents(cash_addition)
     adjusted = opening_balance + cash_addition
     draft = find_draft(entity_id, day)
     created = draft is None
     if draft is not None:
+        if opened is None:
+            raise ReportStarted(draft)
         draft = Report.objects.select_for_update().get(id=draft.id)
+        check_version(draft, opened)
         draft.created_by = user.id  # Flask's ``uploaded_by = username``: the last editor
         draft.opening_balance = opening_balance
         draft.cash_addition = cash_addition
@@ -212,11 +235,24 @@ def save_opening(entity_id, user, day, opening_balance: Decimal, cash_addition: 
             completed_sections=[],
             created_by=user.id,
             cash_addition_type=withdrawal,
+            edit_version=0,
         )
     if withdrawal:
         draft.cash_addition_type = withdrawal
     update_draft_progress(draft, action_type, "opening", "sales")
-    draft.save()
+    mark_saved(draft, user)
+    if created:
+        try:
+            with transaction.atomic():
+                draft.save()
+        except IntegrityError:
+            # Someone else's report for the day landed after the check (report_entity_date_key).
+            theirs = Report.objects.filter(entity_id=entity_id, transaction_date=day).first()
+            if theirs is None:
+                raise
+            raise ReportStarted(theirs) from None
+    else:
+        draft.save()
     log_history(
         draft,
         user,

@@ -16,7 +16,13 @@ from minty_db.enums import SaleType
 from minty_db.models import Entity, EntitySaleSetting, Report, ReportSale, SaleInfo
 
 from petty_cash.money import cents
-from petty_cash.services.reports import log_history, update_draft_progress
+from petty_cash.services.reports import (
+    NOT_SENT,
+    check_version,
+    log_history,
+    mark_saved,
+    update_draft_progress,
+)
 
 #: Cash is the sales-method catalogue's ``other`` row whose ``value_name`` is this.
 CASH_VALUE_NAME = "cash_sales"
@@ -164,11 +170,13 @@ def refresh_sales_totals(report: Report) -> None:
 
 
 @transaction.atomic
-def save_sales(entity_id, user, draft: Report, amounts: dict, action_type: str) -> Report:
+def save_sales(entity_id, user, draft: Report, amounts: dict, action_type: str, opened=NOT_SENT) -> Report:
     """Write the Sales step onto ``draft``: one ``report_sale`` row per method the page shows
     (``amounts`` maps value_name -> amount; a missing method is zero), the totals, the closing
-    balance, the progress and a history line - one transaction."""
+    balance, the progress and a history line - one transaction. A save opened from another
+    ``edit_version`` (``opened``) raises ``StepAlreadySaved`` before anything is written."""
     draft = Report.objects.select_for_update().get(id=draft.id)
+    check_version(draft, opened)
     draft.created_by = user.id
     cash = cents(amounts.get(CASH_VALUE_NAME) or 0)
     draft.cashsale_total = cash
@@ -198,6 +206,7 @@ def save_sales(entity_id, user, draft: Report, amounts: dict, action_type: str) 
         - cents(draft.bank_deposit)
     )
     update_draft_progress(draft, action_type, "sales", "expenses")
+    mark_saved(draft, user)
     draft.save()
     log_history(
         draft,

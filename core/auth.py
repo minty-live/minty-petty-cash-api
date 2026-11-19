@@ -5,6 +5,14 @@ order, and it FAILS CLOSED:
    ``_generate_module_token`` stamps (``billing``; an onboarding token is the onboarding API's
    alone) and a ``user_id`` - else 401 ``unauthorized``;
 2. an approved person who still exists - else 401;
+   2b. the sign-in behind the token (its ``sid``, Phase 9) has not ended - signed out of Minty, or
+   60 minutes without activity - else 401, which the app answers by handing the person over again.
+   ``minty_shared.tokens.session_alive`` asks minty-accounts-api at most once a minute per sid,
+   and the ask keeps the sign-in alive (so every call here is activity). A token with no ``sid``
+   (minted before Phase 9) passes until it expires. A sign-in that has ended - whether the token
+   is still valid or has run out too - adds ``"reason": "session_expired"`` to the 401
+   (``minty_shared.tokens.session_ended``, owner 2026-11-19): the app then says the session has
+   expired and sends the person to sign in, instead of renewing quietly;
 3. a company they belong to (an approved membership), or any company for a system superuser -
    else 403;
 4. a company past onboarding - else 409;
@@ -28,7 +36,7 @@ import jwt
 from django.conf import settings
 from minty_db.enums import EntityStatus, ModuleCode
 from minty_db.models import Entity, User, UserEntity
-from minty_shared import logctx
+from minty_shared import logctx, tokens
 from ninja.security import HttpBearer
 
 from core.entitlements import is_module_enabled
@@ -103,12 +111,22 @@ class PettyCashBearerAuth(HttpBearer):
             )
         except jwt.PyJWTError as exc:
             logger.info("Petty Cash API: token refused (%s)", type(exc).__name__)
+            # Ran out AND its sign-in has ended (the usual case after 60 idle minutes): the 401
+            # says so, and the app shows "Your session has expired" instead of renewing.
+            if isinstance(exc, jwt.ExpiredSignatureError) and tokens.session_ended(
+                token, settings.ACCOUNTS_API_URL, settings.SECRET_KEY
+            ):
+                tokens.mark_session_ended(request)
             return None
         user_id = _uuid(claims.get("user_id"))
         if claims.get("module") != MODULE_TOKEN_CLAIM or user_id is None:
             return None
         user = User.objects.filter(id=user_id).first()
         if user is None or not user.approved:
+            return None
+        if not tokens.session_alive(claims.get("sid"), settings.ACCOUNTS_API_URL, settings.SECRET_KEY):
+            logger.info("Petty Cash API: token refused (its sign-in has ended)")
+            tokens.mark_session_ended(request)
             return None
         # The person is known from here on (a signed, unexpired token for an approved user), so
         # the refusals below name them; the company only once every check has passed.

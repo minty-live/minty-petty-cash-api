@@ -577,6 +577,7 @@ def test_a_contact_created_on_the_expenses_step_is_saved_and_carried_by_the_new_
 
     fake = FakeHttp()
     monkeypatch.setattr("requests.post", fake.post)
+    monkeypatch.setattr("requests.get", fake.get)  # Xero is searched for the name first (C5)
     Entity.objects.filter(id=shop.entity.id).update(xero_org_id=ORG, status="connected")
     draft = _draft(shop)
 
@@ -595,3 +596,46 @@ def test_a_contact_created_on_the_expenses_step_is_saved_and_carried_by_the_new_
     page = _get(client, shop).json()
     assert {"id": "con-new", "name": "Corner Bakery"} in page["suppliers"]
     assert page["lines"][0]["supplier"] == {"id": "con-new", "name": "Corner Bakery"}
+
+
+# ---- the duplicate reminder (owner's decisions doc DUP1, 2026-11-19) ---------------------------------
+
+
+def test_the_same_day_supplier_and_amount_asks_first_and_saves_when_told(client, shop, lists, s3):
+    """DUP1: another line with the same date (the report's day), contact and exactly the same amount
+    is asked about before the save; "save anyway" always saves - it never blocks."""
+    draft = _draft(shop)
+    assert _add(client, shop).status_code == 201
+
+    again = _add(client, shop, description="Flyers again")
+    assert again.status_code == 409
+    body = again.json()
+    assert body["error"] == ("This looks like an expense you already have on this day: the same supplier and "
+                             "amount. Save it anyway?")
+    assert [(d["description"], d["amount"], d["supplier"]) for d in body["duplicates"]] == [
+        ("Flyers", "1012.50", "ABC Supplies")]
+    assert ReportExpense.objects.filter(report_id=draft.id).count() == 1, "nothing saved yet"
+
+    anyway = _add(client, shop, description="Flyers again", confirm_duplicate="true")
+    assert anyway.status_code == 201
+    assert ReportExpense.objects.filter(report_id=draft.id).count() == 2
+
+
+def test_another_amount_or_supplier_is_no_duplicate(client, shop, lists, s3):
+    _draft(shop)
+    assert _add(client, shop).status_code == 201
+    assert _add(client, shop, amount="1,012.51").status_code == 201
+    assert _add(client, shop, supplier_id="con-0002").status_code == 201
+
+
+def test_an_edit_that_makes_a_duplicate_asks_too_and_a_line_is_never_its_own(client, shop, lists, s3):
+    draft = _draft(shop)
+    _line(shop, draft, s3)
+    other, _attachment = _line(shop, draft, s3, amount="5.00")
+    asked = _edit(client, shop, other.id, amount="1012.50")
+    assert asked.status_code == 409 and asked.json()["duplicates"]
+    assert ReportExpense.objects.get(id=other.id).amount == Decimal("5.00")
+    told = _edit(client, shop, other.id, amount="1012.50", confirm_duplicate="true")
+    assert told.status_code == 200
+    lone, _attachment = _line(shop, draft, s3, amount="7.00")
+    assert _edit(client, shop, lone.id, description="New words").status_code == 200
