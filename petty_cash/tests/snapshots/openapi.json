@@ -329,7 +329,7 @@
     },
     "/api/petty-cash/v1/companies/{entity_id}/reports/expenses/extract": {
       "post": {
-        "description": "Multipart ``receipt`` -> the model's suggestions for a line (``services/receipt_reader.py``,\non the engine shared with Payment Request's invoice reader). Who may ask (403) and the file\n(422) are refused with the Expenses step's sentences; past those, every outcome is 200\n``{suggestions, reason}`` - switched off, rate limited, too large, no accounts or suppliers, or\nany failure of the model is ``suggestions: null`` with a reason. Nothing is written.",
+        "description": "Multipart ``receipt`` -> the model's suggestions for a line (``services/receipt_reader.py``,\non the engine shared with Payment Request's invoice reader). Who may ask (403) and the file\n(422) are refused with the Expenses step's sentences; past those, every outcome is 200\n``{suggestions, reason, reader}`` - switched off, the company's AI reads used up\n(``limit_reached``), too large, no accounts or suppliers, or any failure of the model is\n``suggestions: null`` with a reason; ``reader`` is the allowance after the read. Nothing is\nwritten but the read's ``ai_read`` row.",
         "operationId": "petty_cash_routes_expenses_extract_expense",
         "parameters": [],
         "responses": {

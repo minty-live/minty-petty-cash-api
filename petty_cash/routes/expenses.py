@@ -140,8 +140,9 @@ def expenses_page(request):
         "accounts": [{"id": public_id(a), "code": a.xero_code or "", "name": a.name}
                      for a in expense_accounts(entity_id)],
         "permissions": {"create_supplier": has_permission(request.auth_user, Permission.CONTACT_CREATE, entity_id)},
-        # whether "Read the receipt" is offered: the receipt is read only on that press (owner, 2026-11-18)
-        "reader": {"enabled": receipt_reader.CONFIG.enabled()},
+        # whether "Read with AI" is offered (the receipt is read only on that press) and the company's
+        # reads left, shared with Payment Request (owner, 2026-11-18)
+        "reader": receipt_reader.reader_status(entity_id),
     }
 
 
@@ -314,8 +315,10 @@ def extract_expense(request):
     """Multipart ``receipt`` -> the model's suggestions for a line (``services/receipt_reader.py``,
     on the engine shared with Payment Request's invoice reader). Who may ask (403) and the file
     (422) are refused with the Expenses step's sentences; past those, every outcome is 200
-    ``{suggestions, reason}`` - switched off, rate limited, too large, no accounts or suppliers, or
-    any failure of the model is ``suggestions: null`` with a reason. Nothing is written."""
+    ``{suggestions, reason, reader}`` - switched off, the company's AI reads used up
+    (``limit_reached``), too large, no accounts or suppliers, or any failure of the model is
+    ``suggestions: null`` with a reason; ``reader`` is the allowance after the read. Nothing is
+    written but the read's ``ai_read`` row."""
     require_edit(request)
     uploads = [f for f in request.FILES.getlist("receipt") if f and (f.name or "").strip()]
     if not uploads:

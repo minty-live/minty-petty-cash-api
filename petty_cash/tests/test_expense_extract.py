@@ -9,15 +9,20 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+from datetime import timedelta
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import connection, connections
+from django.utils import timezone
 from minty_db.enums import EntityRole
-from minty_db.models import AccountInfo, UserEntity, XeroContactSync
+from minty_db.models import AccountInfo, AiGrant, AiPolicy, AiRead, UserEntity, XeroContactSync
 from minty_shared import ai
+from minty_shared.django import ai_allowance
 
 from petty_cash.services import receipt_reader
-from petty_cash.tests.conftest import WEB, headers, make_user, url
+from petty_cash.tests.conftest import WEB, headers, make_entity, make_user, url
 from petty_cash.tests.test_expenses import JPEG, PNG, lists  # noqa: F401 - the lists fixture
 
 # Every test runs on the shop with its lists (test_expenses.lists): two suppliers, one account on.
@@ -55,30 +60,41 @@ class FakeInteraction:
 
 
 class FakeModel:
-    """The google-genai client's ``interactions.create``."""
+    """The google-genai client's ``interactions.create``. ``by_model`` answers one model its own
+    way (the failover); every other model gets ``answer``."""
 
     def __init__(self):
         self.answer = FakeInteraction(_reply())
+        self.by_model = {}
         self.requests = []
         self.interactions = self
 
     def create(self, **request):
         self.requests.append(request)
-        if isinstance(self.answer, Exception):
-            raise self.answer
-        return self.answer
+        answer = self.by_model.get(request["model"], self.answer)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
 
 @pytest.fixture
-def model(monkeypatch) -> FakeModel:
+def model(monkeypatch, ai_policy) -> FakeModel:
     fake = FakeModel()
     monkeypatch.setattr(ai, "get_client", lambda timeout_s: fake)
     monkeypatch.setattr(ai.time, "sleep", lambda _s: None)
     for name, value in {"EXPENSE_AI_ENABLED": "true", "EXPENSE_AI_CONF_HIGH": "0.85",
-                        "EXPENSE_AI_CONF_MEDIUM": "0.60", "EXPENSE_AI_MODEL": "gemini-3.8-flash"}.items():
+                        "EXPENSE_AI_CONF_MEDIUM": "0.60"}.items():
         monkeypatch.setenv(name, value)
-    receipt_reader.LIMITER.reset()
     return fake
+
+
+def _policy(**changes):
+    """Change the policy as an operator's UPDATE would."""
+    AiPolicy.objects.filter(id=1).update(**changes)
+
+
+#: One read with the stand-in model: 5,000 in + 300 out + 400 thinking.
+READ_TOKENS = 5700
 
 
 def _extract(client, shop, user=None, *, receipt=PNG, name="slip.jpg", files=None):
@@ -101,6 +117,9 @@ def test_a_receipt_is_read_against_the_company_s_own_lists(client, shop, model):
     assert resp["Access-Control-Allow-Origin"] == WEB and resp["Cache-Control"] == "no-store"
     body = resp.json()
     assert body["reason"] is None
+    # the first read gave the company its one-time grant (10,000 tokens) and used 5,700 of it
+    assert body["reader"] == {"enabled": True, "reads_used": None, "reads_limit": None, "reads_left": None,
+                              "percent_left": 43, "blocked": False, "resumes_at": None}
     s = body["suggestions"]
     assert s["supplier"] == {"value": "ABC Supplies", "confidence": 0.93, "band": "high",
                              "applied": True, "contact_id": "con-0001"}
@@ -129,17 +148,17 @@ def test_the_prefix_carries_only_what_a_line_can_use_in_a_stable_order(client, s
 
 @pytest.mark.parametrize("env, reason", [
     ({"EXPENSE_AI_ENABLED": "false"}, "disabled"),
-    ({"EXPENSE_AI_RATE_USER_PER_MIN": "0"}, "rate_limited"),
     ({"EXPENSE_AI_MAX_FILE_MB": "0"}, "file_too_large"),
-], ids=["off", "rate-limited", "too-large"])
+], ids=["off", "too-large"])
 def test_refusals_past_the_checks_are_a_silent_no_suggestion(client, shop, model, monkeypatch, env, reason):
     for name, value in env.items():
         monkeypatch.setenv(name, value)
 
     resp = _extract(client, shop)
 
-    assert resp.status_code == 200 and resp.json() == {"suggestions": None, "reason": reason}
-    assert model.requests == []
+    body = resp.json()
+    assert resp.status_code == 200 and (body["suggestions"], body["reason"]) == (None, reason)
+    assert model.requests == [] and not AiRead.objects.exists()  # refused before a read: none used
 
 
 def test_a_company_with_nothing_to_choose_from_asks_no_question(client, shop, model):
@@ -148,8 +167,9 @@ def test_a_company_with_nothing_to_choose_from_asks_no_question(client, shop, mo
 
     resp = _extract(client, shop)
 
-    assert resp.status_code == 200 and resp.json() == {"suggestions": None, "reason": "no_context"}
-    assert model.requests == []
+    body = resp.json()
+    assert resp.status_code == 200 and (body["suggestions"], body["reason"]) == (None, "no_context")
+    assert model.requests == [] and body["reader"]["percent_left"] == 100
 
 
 def test_a_failure_of_the_model_is_a_silent_no_suggestion(client, shop, model):
@@ -157,7 +177,9 @@ def test_a_failure_of_the_model_is_a_silent_no_suggestion(client, shop, model):
 
     resp = _extract(client, shop)
 
-    assert resp.status_code == 200 and resp.json() == {"suggestions": None, "reason": "timeout"}
+    body = resp.json()
+    assert resp.status_code == 200 and (body["suggestions"], body["reason"]) == (None, "timeout")
+    assert body["reader"]["percent_left"] == 100  # a failed read uses none up
 
 
 def test_one_log_line_with_numbers_and_never_the_values(client, shop, model, caplog):
@@ -167,6 +189,7 @@ def test_one_log_line_with_numbers_and_never_the_values(client, shop, model, cap
 
     [line] = [r.getMessage() for r in caplog.records if "expense_ai: extract" in r.getMessage()]
     assert f"entity={shop.entity.id}" in line and "tokens_in=5000" in line and "status=ok" in line
+    assert "model=gemini-3.8-flash attempts=gemini-3.8-flash:ok" in line
     # the ids are random: one holding "120" once failed CI (2026-11-11), so they go before the check
     bare = re.sub(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "<id>", line)
     assert "ABC Supplies" not in bare and "120" not in bare and "Flyers" not in bare
@@ -235,6 +258,7 @@ def test_a_plausible_name_does_not_rescue_a_bad_id(client, shop, model):
 
 
 def test_an_unmatched_supplier_name_is_offered_capped(client, shop, model):
+    _policy(default_grant={"tokens": 100000})  # three reads
     s, _ = _read(client, shop, model, supplier_contact_id="", supplier_name="Caspita Restaurant")
     assert (s["supplier"]["applied"], s["supplier"]["detected_name"]) == (False, "Caspita Restaurant")
     s, _ = _read(client, shop, model, supplier_contact_id="", supplier_name="z" * 400)
@@ -285,7 +309,8 @@ def test_the_check_command_sends_a_generated_image_and_reports_the_round_trip(mo
     call_command("expense_ai_check")
 
     out = capsys.readouterr().out
-    assert "model            : gemini-3.8-flash" in out and "Round trip OK" in out
+    assert "models           : gemini-3.8-flash" in out and "Round trip OK" in out
+    assert "answered by      : gemini-3.8-flash" in out
     assert "tokens in / out  : 5000 / 300" in out
     [request] = model.requests
     assert request["input"][1]["mime_type"] == "image/png"
@@ -298,3 +323,262 @@ def test_the_check_command_fails_loudly_when_the_model_does_not_answer(model):
     model.answer = TimeoutError("deadline exceeded")
     with pytest.raises(CommandError, match="FAILED: timeout"):
         call_command("expense_ai_check")
+
+
+# --- the allowance: each company's grants, shared with Payment Request (owner, 2026-11-18) ------
+
+
+def test_the_first_read_gives_the_one_time_grant_and_a_used_up_grant_stops_reading(client, shop, model):
+    first = _extract(client, shop).json()["reader"]    # 5,700 of 10,000
+    second = _extract(client, shop).json()["reader"]   # 11,400: used up (the crossing read finishes)
+    refused = _extract(client, shop).json()
+
+    assert (first["percent_left"], first["blocked"]) == (43, False)
+    assert (second["percent_left"], second["blocked"]) == (0, True)
+    assert (refused["suggestions"], refused["reason"]) == (None, "limit_reached")
+    assert len(model.requests) == 2
+    [grant] = AiGrant.objects.filter(entity_id=shop.entity.id)
+    assert (grant.source, grant.tokens_total, grant.granted_by) == ("default", 10000, "ai_policy")
+    assert AiRead.objects.filter(entity_id=shop.entity.id, grant_id=grant.id).count() == 2
+
+
+def test_the_default_grant_is_given_once_ever(client, shop, model):
+    for _ in range(3):
+        _extract(client, shop)
+    assert AiGrant.objects.filter(entity_id=shop.entity.id).count() == 1
+
+
+def test_a_top_up_lets_a_used_up_company_read_again_and_is_charged_next(client, shop, model):
+    _extract(client, shop)
+    _extract(client, shop)
+    top_up = ai_allowance.give_grant(shop.entity.id, ai_allowance.GrantSpec(tokens=40000), granted_by="ops")
+
+    body = _extract(client, shop).json()
+
+    assert body["reason"] is None and body["reader"]["percent_left"] == 86  # 34,300 of 40,000
+    assert AiRead.objects.filter(grant_id=top_up).count() == 1  # charged to the top-up, not the spent grant
+
+
+def test_no_default_grant_means_only_grants_given_by_hand(client, shop, model):
+    _policy(default_grant=None)
+
+    refused = _extract(client, shop).json()
+    assert refused["reason"] == "limit_reached" and refused["reader"]["percent_left"] == 0
+    ai_allowance.give_grant(shop.entity.id, ai_allowance.GrantSpec(reads=2), granted_by="ops")
+    after = _extract(client, shop).json()["reader"]
+
+    assert (after["reads_left"], after["reads_limit"], after["percent_left"]) == (1, 2, 50)
+    assert len(model.requests) == 1
+
+
+def test_an_expired_grant_no_longer_counts(client, shop, model):
+    _policy(default_grant=None)
+    grant = ai_allowance.give_grant(shop.entity.id, ai_allowance.GrantSpec(tokens=50000, days=30))
+    AiGrant.objects.filter(id=grant).update(expires_at=timezone.now() - timedelta(minutes=1))
+
+    assert _extract(client, shop).json()["reason"] == "limit_reached"
+    assert model.requests == []
+
+
+def test_a_failed_read_uses_none_of_the_grant_but_its_tokens_are_recorded(client, shop, model):
+    model.answer = FakeInteraction("{not json")
+
+    body = _extract(client, shop).json()
+
+    assert body["reason"] == "invalid_reply" and body["reader"]["percent_left"] == 100
+    [row] = AiRead.objects.filter(entity_id=shop.entity.id)
+    assert (row.status, row.module, row.reason) == ("failed", "petty_cash", "invalid_reply")
+    assert (row.tokens_in, row.tokens_out, row.tokens_thought) == (5000, 300, 400)
+    assert row.model_answered is None and row.finished_at is not None
+
+
+def test_nothing_usable_is_still_a_read(client, shop, model):
+    low = {k: 0.1 for k in ("supplier_confidence", "account_confidence", "amount_confidence",
+                            "description_confidence", "document_date_confidence")}
+    model.answer = FakeInteraction(_reply(**low))
+
+    body = _extract(client, shop).json()
+
+    assert body["reason"] == "no_usable_field" and body["reader"]["percent_left"] == 43
+
+
+def test_payment_request_reads_use_the_same_grants(client, shop, model):
+    grant = ai_allowance.give_grant(shop.entity.id, ai_allowance.GrantSpec(tokens=10000))
+    AiRead.objects.create(entity_id=shop.entity.id, grant_id=grant, module="payment_request", status="ok",
+                          tokens_in=9000, tokens_out=500)
+
+    body = _extract(client, shop).json()  # 500 left: this read may finish, then nothing
+    assert body["reason"] is None and body["reader"]["blocked"] is True
+    assert _extract(client, shop).json()["reason"] == "limit_reached"
+
+
+def test_another_company_s_grants_and_reads_are_its_own(client, shop, model):
+    other = make_entity(shop.owner, name="Other Shop", currency=shop.currency)
+    used = ai_allowance.give_grant(other.id, ai_allowance.GrantSpec(tokens=100))
+    AiRead.objects.create(entity_id=other.id, grant_id=used, module="petty_cash", status="ok", tokens_in=500)
+
+    assert _extract(client, shop).json()["reader"]["percent_left"] == 43
+
+
+def test_the_backup_answers_when_the_primary_fails_and_the_row_says_so(client, shop, model, caplog):
+    caplog.set_level("INFO", logger="minty-shared.ai")
+    _policy(primary_model="gemini-3.5-flash-lite", backup_model="gemini-3.8-flash")
+    model.by_model["gemini-3.5-flash-lite"] = TimeoutError("deadline exceeded")
+
+    body = _extract(client, shop).json()
+
+    assert body["reason"] is None and body["suggestions"]["amount"]["value"] == "120.00"
+    assert [r["model"] for r in model.requests] == ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
+    [row] = AiRead.objects.filter(entity_id=shop.entity.id)
+    assert (row.status, row.model_answered) == ("ok", "gemini-3.8-flash")
+    assert row.attempts == "gemini-3.5-flash-lite:timeout>gemini-3.8-flash:ok"
+    [line] = [r.getMessage() for r in caplog.records if "expense_ai: extract" in r.getMessage()]
+    assert "model=gemini-3.8-flash attempts=gemini-3.5-flash-lite:timeout>gemini-3.8-flash:ok" in line
+
+
+def test_a_model_change_takes_effect_on_the_next_read(client, shop, model):
+    _policy(default_grant={"tokens": 100000})
+    _extract(client, shop)
+    _policy(primary_model="gemini-3.1-pro-preview")
+    _extract(client, shop)
+
+    assert [r["model"] for r in model.requests] == ["gemini-3.8-flash", "gemini-3.1-pro-preview"]
+
+
+def test_an_extra_daily_cap_pauses_reading_until_the_window_moves(client, shop, model):
+    _policy(default_grant={"tokens": 100000}, limit_rules=[{"reads": 1, "period_days": 1}])
+
+    first = _extract(client, shop).json()["reader"]
+    paused = _extract(client, shop).json()
+
+    assert first["blocked"] is True and first["percent_left"] == 95  # the grant still has room
+    assert paused["reason"] == "limit_reached" and paused["reader"]["resumes_at"] is not None
+    assert len(model.requests) == 1
+
+
+def test_a_read_outside_a_cap_s_window_no_longer_counts(client, shop, model):
+    _policy(default_grant={"tokens": 100000}, limit_rules=[{"reads": 1, "period_days": 30}])
+    old = AiRead.objects.create(entity_id=shop.entity.id, module="petty_cash", status="ok")
+    AiRead.objects.filter(id=old.id).update(created_at=timezone.now() - timedelta(days=31))
+
+    assert _extract(client, shop).json()["reason"] is None
+
+
+def test_a_read_left_pending_by_a_crash_stops_holding_a_place(client, shop, model):
+    _policy(default_grant=None)
+    grant = ai_allowance.give_grant(shop.entity.id, ai_allowance.GrantSpec(reads=1))
+    stale = AiRead.objects.create(entity_id=shop.entity.id, grant_id=grant, module="payment_request",
+                                  status="pending")
+    AiRead.objects.filter(id=stale.id).update(created_at=timezone.now() - timedelta(minutes=6))
+
+    assert _extract(client, shop).json()["reason"] is None
+
+
+def test_no_policy_turns_reading_off_loudly(client, shop, model, caplog):
+    AiPolicy.objects.all().delete()
+
+    body = _extract(client, shop).json()
+
+    assert (body["reason"], body["reader"]) == ("not_configured", {"enabled": False})
+    assert model.requests == [] and "ai_policy has no row" in caplog.text
+
+
+@pytest.mark.parametrize("change", [{"limit_rules": [{"reads": "ten"}]}, {"default_grant": {"credits": 5}}])
+def test_a_policy_that_does_not_parse_turns_reading_off_loudly(client, shop, model, caplog, change):
+    _policy(**change)
+
+    assert _extract(client, shop).json()["reader"] == {"enabled": False}
+    assert "ai_policy is unusable" in caplog.text and model.requests == []
+
+
+@pytest.mark.django_db(transaction=True)
+def test_two_reads_with_room_for_one_let_exactly_one_through(shop, ai_policy):
+    """The per-company lock: both services reserve under one Postgres advisory lock per company."""
+    if connection.vendor != "postgresql":
+        pytest.skip("the advisory lock is Postgres's; SQLite serialises writers itself")
+    AiPolicy.objects.filter(id=1).update(default_grant={"reads": 1})
+    policy = ai_allowance.load_policy()
+    results, start = [], threading.Barrier(2)
+
+    def reserve():
+        start.wait()
+        try:
+            results.append(ai_allowance.reserve(shop.entity.id, shop.owner.id, "petty_cash", policy)[0])
+        finally:
+            connections.close_all()
+
+    threads = [threading.Thread(target=reserve) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert sorted(r is None for r in results) == [False, True]
+    assert AiRead.objects.filter(entity_id=shop.entity.id).count() == 1
+    assert AiGrant.objects.filter(entity_id=shop.entity.id).count() == 1  # the default given once
+
+
+# --- the operator's command ---------------------------------------------------------------------
+
+
+def test_the_policy_command_changes_models_default_grant_and_caps_after_checking_them(ai_policy, capsys):
+    from django.core.management import call_command
+
+    call_command("ai_policy", "--set-models", "gemini-3.5-flash-lite", "gemini-3.8-flash",
+                 "--set-default-grant", '{"tokens": 50000, "days": 90}',
+                 "--set-rules", '[{"reads": 20, "period_days": 1}]', "--by", "ops")
+
+    ai_policy.refresh_from_db()
+    assert (ai_policy.primary_model, ai_policy.backup_model) == ("gemini-3.5-flash-lite", "gemini-3.8-flash")
+    assert ai_policy.default_grant == {"tokens": 50000, "days": 90}
+    assert ai_policy.limit_rules == [{"reads": 20, "period_days": 1}]
+    assert ai_policy.updated_by == "ops"
+    out = capsys.readouterr().out
+    assert "models        : gemini-3.5-flash-lite -> gemini-3.8-flash" in out
+    assert 'default grant : {"tokens": 50000, "days": 90}' in out
+
+
+def test_the_policy_command_can_turn_the_automatic_grant_off(ai_policy):
+    from django.core.management import call_command
+
+    call_command("ai_policy", "--set-default-grant", "null")
+
+    ai_policy.refresh_from_db()
+    assert ai_policy.default_grant is None
+
+
+def test_the_policy_command_gives_a_company_a_grant(ai_policy, shop, capsys):
+    from django.core.management import call_command
+
+    call_command("ai_policy", "--grant", str(shop.entity.id), "--tokens", "50000", "--days", "30",
+                 "--note", "pilot", "--by", "ops")
+
+    [grant] = AiGrant.objects.filter(entity_id=shop.entity.id)
+    assert (grant.tokens_total, grant.reads_total, grant.source) == (50000, None, "manual")
+    assert (grant.granted_by, grant.note) == ("ops", "pilot") and grant.expires_at is not None
+    out = capsys.readouterr().out
+    assert "Grant given to Acme Shop" in out and "0/50000 tokens" in out
+
+
+@pytest.mark.parametrize("args, says", [
+    (["--set-rules", '[{"reads": "ten"}]'], "whole number"),
+    (["--set-rules", "not json"], "not JSON"),
+    (["--set-default-grant", '{"days": 30}'], "gives nothing"),
+    (["--set-models", "openai:gpt-6.1-terra"], "approved provider"),
+    (["--set-models", "gemini-3.8-flash", "gemini-3.8-flash"], "different model"),
+])
+def test_the_policy_command_refuses_a_change_that_would_break_reading(ai_policy, args, says):
+    from django.core.management import CommandError, call_command
+
+    with pytest.raises(CommandError, match=says):
+        call_command("ai_policy", *args)
+    ai_policy.refresh_from_db()
+    assert (ai_policy.primary_model, ai_policy.default_grant) == ("gemini-3.8-flash", {"tokens": 10000})
+
+
+def test_the_policy_command_refuses_a_grant_of_nothing(ai_policy, shop):
+    from django.core.management import CommandError, call_command
+
+    with pytest.raises(CommandError, match="gives nothing"):
+        call_command("ai_policy", "--grant", str(shop.entity.id), "--days", "30")
+    assert not AiGrant.objects.exists()

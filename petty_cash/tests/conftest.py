@@ -17,6 +17,7 @@ from django.conf import settings
 from django.test import Client
 from minty_db.enums import CashType, EntityRole, EntityStatus, ModuleCode, SystemRole
 from minty_db.models import (
+    AiPolicy,
     CashInfo,
     CountryInfo,
     CurrencyInfo,
@@ -137,3 +138,12 @@ def notes(shop) -> dict:
                                       display_order=order, is_active=True)
         ids[value] = str(row.id)
     return ids
+
+
+@pytest.fixture
+def ai_policy(db) -> AiPolicy:
+    """minty-db's one ``ai_policy`` row (seed_catalogue.sql writes it in a real database): one
+    model, no backup, the preview's one-time grant of 10,000 tokens per company and no extra caps.
+    A test changes it as an operator would."""
+    return AiPolicy.objects.create(id=1, primary_model="gemini-3.8-flash", backup_model=None,
+                                   default_grant={"tokens": 10000}, limit_rules=[])

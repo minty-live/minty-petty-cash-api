@@ -1,7 +1,8 @@
 """``python manage.py expense_ai_check`` - one round trip to the model, from where the code runs.
 
 Moved from Flask's ``flask expense-ai check`` (2026-11-04). It sends a tiny generated image, never a
-customer receipt, and prints the route, the model, the latency and the token usage, so "is this
+customer receipt, and prints the route, the models (``ai_policy``'s, in order), which one answered,
+the latency and the token usage, so "is this
 configured correctly" is a fact rather than a guess. Exits 1 when the model did not answer.
 """
 
@@ -11,6 +12,7 @@ import io
 
 from django.core.management.base import BaseCommand, CommandError
 from minty_shared import ai
+from minty_shared.django import ai_allowance
 from PIL import Image
 
 from petty_cash.services import receipt_reader as rr
@@ -30,7 +32,13 @@ class Command(BaseCommand):
         self.stdout.write(f"enabled          : {config.enabled()}")
         self.stdout.write(f"route            : {'Vertex AI' if ai.uses_vertex() else 'direct Gemini API'}")
         self.stdout.write(f"location         : {ai.location()}")
-        self.stdout.write(f"model            : {config.model_id()}")
+        policy = ai_allowance.load_policy()
+        models = policy.models if policy else [config.model_id()]
+        if policy is None:
+            self.stdout.write(self.style.WARNING(
+                "WARNING: no usable ai_policy row - the readers are OFF; checking EXPENSE_AI_MODEL instead."
+            ))
+        self.stdout.write(f"models           : {', '.join(models)}")
         self.stdout.write(f"thinking_level   : {config.thinking_level()}")
         if not ai.uses_vertex():
             self.stdout.write(self.style.WARNING(
@@ -44,9 +52,11 @@ class Command(BaseCommand):
         result = ai.read(buffer.getvalue(), "image/png", config=config, instruction=rr.INSTRUCTION,
                          prefix_text=rr.prefix_text(_CONTEXT), closing_text=rr.CLOSING,
                          reply_model=rr.ExpenseSuggestion,
-                         validate=lambda parsed: rr.validate(parsed, _CONTEXT))
+                         validate=lambda parsed: rr.validate(parsed, _CONTEXT), models=models)
 
         audit = result.audit
+        self.stdout.write(f"answered by      : {audit.get('model_answered') or '-'}")
+        self.stdout.write(f"attempts         : {result.attempts_text()}")
         self.stdout.write(f"latency_ms       : {audit.get('latency_ms')}")
         self.stdout.write(f"request id       : {audit.get('provider_request_id')}")
         self.stdout.write(f"tokens in / out  : {audit.get('input_tokens')} / {audit.get('output_tokens')}")

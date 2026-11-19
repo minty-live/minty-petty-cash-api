@@ -2,17 +2,20 @@
 
 Ported unchanged from Flask's ``blueprints/report/services/expense_ai.py`` (Stage 1, Minty
 ``docs/expense_ai/``): the instruction, the receipt's reply, the company's lists sent with it, and
-the check of the reply against those lists. The engine - the call, its retries, the switches, the
-rate limit, cost and the one log line - is ``minty_shared.ai``, shared with Payment Request's
-invoice reader, and the small copy the model reads is ``minty_shared.model_input``.
+the check of the reply against those lists. The engine - the call, its retries, the switch, the
+models and their failover, cost and the one log line - is ``minty_shared.ai``, shared with Payment
+Request's invoice reader; how many reads a company has left, and which models to try, is
+``minty_shared.django.ai_allowance`` (minty-db's ``ai_policy``/``ai_read``, one allowance for both
+modules; owner, 2026-11-18); the small copy the model reads is ``minty_shared.model_input``.
 
 Brain 1, the model, reads the receipt and applies its own knowledge of what the vendor sells;
 Brain 2, Minty, supplies the company's chart of accounts and suppliers; Brain 3, the person, is
 the final authority - nothing here writes any record. Every failure is "no suggestion" with a
 reason, and the line is typed by hand as before.
 
-Configuration: ``EXPENSE_AI_*`` (``minty_shared.ai.ReaderConfig``), the route's
-``GEMINI_API_KEY``/``EXPENSE_AI_ALLOW_DIRECT_API``/``EXPENSE_AI_DIRECT_TIER``.
+Configuration: ``EXPENSE_AI_*`` (``minty_shared.ai.ReaderConfig``; ``EXPENSE_AI_ENABLED`` is the
+kill switch), the route's ``GEMINI_API_KEY``/``EXPENSE_AI_ALLOW_DIRECT_API``/
+``EXPENSE_AI_DIRECT_TIER``, and the ``ai_policy`` row (models and limit rules).
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from decimal import Decimal, InvalidOperation
 
 from minty_db.models import CurrencyInfo, Entity
 from minty_shared import ai
+from minty_shared.django import ai_allowance
 from minty_shared.model_input import prepare_for_model
 from pydantic import BaseModel, Field
 
@@ -30,7 +34,6 @@ from petty_cash.services.expenses import expense_accounts, public_id, suppliers
 logger = logging.getLogger("petty-cash-api")
 
 CONFIG = ai.ReaderConfig("EXPENSE_AI")
-LIMITER = ai.RateLimiter()
 
 _MAX_AMOUNT = Decimal("10000000")
 _MAX_DESCRIPTION = 200
@@ -218,24 +221,47 @@ def validate(parsed: ExpenseSuggestion, context: dict) -> dict:
     }
 
 
+def reader_status(entity_id) -> dict:
+    """The page's ``reader``: whether "Read with AI" is offered, and the company's reads left."""
+    return ai_allowance.reader_status(CONFIG.enabled(), entity_id)
+
+
 def read_receipt(entity_id, user_id, data: bytes, mime: str) -> dict:
-    """``{suggestions, reason}`` for a receipt the route has checked (who asks, one PDF/JPEG/PNG
-    by its bytes, at most 10 MB). ``suggestions`` is null on every failure; every outcome is the
-    caller's 200."""
+    """``{suggestions, reason, reader}`` for a receipt the route has checked (who asks, one
+    PDF/JPEG/PNG by its bytes, at most 10 MB). ``suggestions`` is null on every failure; every
+    outcome is the caller's 200. ``reader`` is the allowance after this read, so the page's count
+    moves without another call. A read is reserved before the model is called and counts only if
+    a model answered (``ai_allowance``); a refusal before that point uses nothing."""
     if not CONFIG.enabled():
-        return {"suggestions": None, "reason": ai.REASON_DISABLED}
-    if not LIMITER.allow(user_id, entity_id, CONFIG):
-        logger.info("receipt reader: rate limited entity=%s", entity_id)
-        return {"suggestions": None, "reason": ai.REASON_RATE_LIMITED}
+        return {"suggestions": None, "reason": ai.REASON_DISABLED, "reader": {"enabled": False}}
+    policy = ai_allowance.load_policy()
+    if policy is None:
+        return {"suggestions": None, "reason": ai.REASON_NOT_CONFIGURED, "reader": {"enabled": False}}
     if len(data) > CONFIG.max_file_bytes():
-        return {"suggestions": None, "reason": ai.REASON_FILE_TOO_LARGE}
+        return _no_read(ai.REASON_FILE_TOO_LARGE, entity_id, policy)
     context = build_context(entity_id)
     if context is None:
         logger.info("receipt reader: no accounts or suppliers for entity=%s", entity_id)
-        return {"suggestions": None, "reason": ai.REASON_NO_CONTEXT}
-    document, document_mime = prepare_for_model(data, mime)
-    result = ai.read(document, document_mime, config=CONFIG, instruction=INSTRUCTION,
-                     prefix_text=prefix_text(context), closing_text=CLOSING,
-                     reply_model=ExpenseSuggestion, validate=lambda parsed: validate(parsed, context))
+        return _no_read(ai.REASON_NO_CONTEXT, entity_id, policy)
+    read_id, allowance = ai_allowance.reserve(entity_id, user_id, ai_allowance.MODULE_PETTY_CASH, policy)
+    if read_id is None:
+        logger.info("receipt reader: allowance used up entity=%s", entity_id)
+        return {"suggestions": None, "reason": ai.REASON_LIMIT_REACHED,
+                "reader": {"enabled": True, **allowance.as_dict()}}
+    result = ai.Extraction(reason=ai.REASON_PROVIDER_ERROR)
+    try:
+        document, document_mime = prepare_for_model(data, mime)
+        result = ai.read(document, document_mime, config=CONFIG, instruction=INSTRUCTION,
+                         prefix_text=prefix_text(context), closing_text=CLOSING,
+                         reply_model=ExpenseSuggestion, validate=lambda parsed: validate(parsed, context),
+                         models=policy.models)
+    finally:
+        # Even if something here raised, the reserved read is closed (failed, so never counted).
+        ai_allowance.finish(read_id, result)
     ai.log_read(CONFIG, result, entity_id=entity_id, user_id=user_id)
-    return result.answer()
+    return {**result.answer(), "reader": {"enabled": True, **ai_allowance.status(entity_id, policy).as_dict()}}
+
+
+def _no_read(reason: str, entity_id, policy: ai_allowance.Policy) -> dict:
+    return {"suggestions": None, "reason": reason,
+            "reader": {"enabled": True, **ai_allowance.status(entity_id, policy).as_dict()}}

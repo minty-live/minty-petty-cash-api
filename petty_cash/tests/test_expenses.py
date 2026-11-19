@@ -141,8 +141,10 @@ def test_the_page_brings_the_lines_and_what_a_line_may_use(client, shop, lists, 
 
 
 @pytest.mark.parametrize(("switch", "enabled"), [("true", True), ("false", False), (None, False)])
-def test_the_page_says_whether_the_receipt_reader_is_on(client, shop, lists, monkeypatch, switch, enabled):
-    """The app offers "Read the receipt" only when ``EXPENSE_AI_ENABLED`` is on (off unless set)."""
+def test_the_page_says_whether_the_receipt_reader_is_on(client, shop, lists, ai_policy, monkeypatch, switch,
+                                                         enabled):
+    """The app offers "Read with AI" only when ``EXPENSE_AI_ENABLED`` is on (off unless set), with
+    the company's reads left (shared with Payment Request); a switched-off reader sends no count."""
     _draft(shop)
     if switch is None:
         monkeypatch.delenv("EXPENSE_AI_ENABLED", raising=False)
@@ -152,7 +154,11 @@ def test_the_page_says_whether_the_receipt_reader_is_on(client, shop, lists, mon
     resp = _get(client, shop)
 
     assert resp.status_code == 200, resp.content
-    assert resp.json()["reader"] == {"enabled": enabled}
+    expected = {"enabled": False}
+    if enabled:
+        expected = {"enabled": True, "reads_used": None, "reads_limit": None, "reads_left": None,
+                    "percent_left": 100, "blocked": False, "resumes_at": None}
+    assert resp.json()["reader"] == expected
 
 
 def test_with_no_draft_the_page_goes_back_to_opening(client, shop, lists):
