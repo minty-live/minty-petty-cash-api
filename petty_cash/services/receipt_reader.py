@@ -42,6 +42,9 @@ _MAX_AMOUNT = Decimal("10000000")
 # need only be a sane number (20,000,000 KRW is about HKD 112,000).
 _MAX_FOREIGN_AMOUNT = Decimal("999999999999")
 _MAX_DESCRIPTION = 200
+_MAX_DATE_RAW = 40
+#: A card terminal slip alone (owner, 2026-11-19): nothing is filled; the page says why.
+REASON_CARD_SLIP = "card_slip_only"
 
 
 class ExpenseSuggestion(BaseModel):
@@ -69,6 +72,11 @@ class ExpenseSuggestion(BaseModel):
     # "Extract and check": used only to note a receipt a long way from the report's day.
     document_date: str = Field(default="", description="ISO 8601 date, or empty")
     document_date_confidence: float = 0.0
+
+    # The owner's prompt update (2026-11-19): the date as printed, and a card terminal slip alone
+    # (no items), which fills nothing - "A card slip alone is not valid evidence."
+    date_raw: str = ""
+    card_slip_only: bool = False
 
 
 INSTRUCTION = (
@@ -110,6 +118,12 @@ INSTRUCTION = (
     "kept in English, so a description in another language sits oddly "
     "beside the English account name it is filed under.\n"
     "- document_date is the date printed on the document, as YYYY-MM-DD.\n"
+    "- currency is the ISO 4217 code of the amounts on the document. If only '$' is printed, "
+    "infer it from the issuer's country.\n"
+    "- date_raw is the date exactly as printed on the document, character for character. "
+    "Do not reformat it.\n"
+    "- card_slip_only is true if the document is only a card terminal slip that does not show "
+    "what was bought. If so, leave description_value and account_id empty.\n"
     "- Answer only with the JSON object described by the response schema."
 )
 CLOSING = "Extract the fields for this receipt."
@@ -224,6 +238,9 @@ def validate(parsed: ExpenseSuggestion, context: dict) -> dict:
                                   parsed.document_date_confidence, CONFIG),
         "currency": currency,
         "entity_currency": context["entity"]["currency"],
+        # the date as printed (owner, 2026-11-19): untrusted text, handed on and never logged
+        "date_raw": (parsed.date_raw or "").strip()[:_MAX_DATE_RAW],
+        "card_slip_only": bool(parsed.card_slip_only),
     }
 
 
@@ -268,6 +285,10 @@ def read_receipt(entity_id, user_id, data: bytes, mime: str, report_date: date |
         ai_allowance.finish(read_id, result)
     ai.log_read(CONFIG, result, entity_id=entity_id, user_id=user_id)
     answer = result.answer()
+    if answer["suggestions"] and answer["suggestions"].get("card_slip_only"):
+        # a card terminal slip alone is not evidence of what was bought: fill nothing (the read
+        # still counts - a model answered)
+        answer = {"suggestions": None, "reason": REASON_CARD_SLIP}
     if answer["suggestions"]:
         # another currency: converted at Frankfurter's rate (owner, 2026-11-19) - after the read,
         # outside the model's failover, so it is asked once

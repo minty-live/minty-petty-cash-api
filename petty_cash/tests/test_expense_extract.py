@@ -582,3 +582,42 @@ def test_the_policy_command_refuses_a_grant_of_nothing(ai_policy, shop):
     with pytest.raises(CommandError, match="gives nothing"):
         call_command("ai_policy", "--grant", str(shop.entity.id), "--days", "30")
     assert not AiGrant.objects.exists()
+
+
+# --- the owner's prompt update (2026-11-19): currency from '$', the raw date, card slips -----------
+
+LAST_LINE = "- Answer only with the JSON object described by the response schema."
+
+
+def test_the_instruction_adds_the_currency_raw_date_and_card_slip_rules_before_its_last_line():
+    instruction = receipt_reader.INSTRUCTION
+    for rule in (
+        "- currency is the ISO 4217 code of the amounts on the document. If only '$' is printed, "
+        "infer it from the issuer's country.\n",
+        "- date_raw is the date exactly as printed on the document, character for character. "
+        "Do not reformat it.\n",
+        "- card_slip_only is true if the document is only a card terminal slip that does not show "
+        "what was bought. If so, leave description_value and account_id empty.\n",
+    ):
+        assert rule in instruction
+        assert instruction.index(rule) < instruction.index(LAST_LINE)
+    assert instruction.endswith(LAST_LINE)
+    fields = receipt_reader.ExpenseSuggestion.model_fields
+    assert fields["date_raw"].default == "" and fields["card_slip_only"].default is False
+
+
+def test_the_raw_date_is_handed_on_as_printed_and_capped(client, shop, model):
+    s, _ = _read(client, shop, model, date_raw="  28/08/26  ")
+    assert s["date_raw"] == "28/08/26"
+    s, _ = _read(client, shop, model, date_raw="x" * 500)
+    assert len(s["date_raw"]) == 40
+
+
+def test_a_card_slip_fills_nothing_and_says_so_but_is_a_read(client, shop, model):
+    model.answer = FakeInteraction(_reply(card_slip_only=True, description_value="", account_id=""))
+
+    body = _extract(client, shop).json()
+
+    assert body["suggestions"] is None and body["reason"] == "card_slip_only"
+    [row] = AiRead.objects.filter(entity_id=shop.entity.id)
+    assert row.status == "ok"  # a model answered: it counts against the allowance

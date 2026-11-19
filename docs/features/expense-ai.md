@@ -85,6 +85,23 @@ minty-petty-cash-api's `python manage.py ai_policy`, never a release:
 - **Production:** the owner chose Vertex AI (2026-11-18); until it is set up production still uses
   the direct Gemini API on the FREE tier, which does not meet "approved providers only".
 
+## The prompt update (owner, 2026-11-19)
+
+Three rules join the instruction, before its last line:
+
+- **Currency:** `currency` is the ISO 4217 code of the amounts on the document; when only "$" is
+  printed, the model infers it from the issuer's country (an HKD company's "$" receipt from a US
+  shop comes back USD and is then converted, above).
+- **The date as printed:** `date_raw`, character for character, never reformatted. Handed on in
+  the answer as untrusted text (stripped, capped at 40) and never logged; no screen uses it yet -
+  it is there for checking an ambiguous day such as 01/02.
+- **A card slip alone:** `card_slip_only` is true when the document is only a card terminal slip
+  that does not show what was bought (the model also leaves `description_value` and `account_id`
+  empty). The route then answers `{suggestions: null, reason: "card_slip_only"}` - nothing is
+  filled and no rate is asked - and the page says "A card slip alone is not valid evidence. Please
+  attach a receipt that shows what was bought." The read still counts against the company's
+  allowance: a model answered.
+
 ## A receipt in another currency (owner, 2026-11-19)
 
 When the receipt's currency is not the company's, the amount comes back **converted** at
