@@ -85,6 +85,35 @@ minty-petty-cash-api's `python manage.py ai_policy`, never a release:
 - **Production:** the owner chose Vertex AI (2026-11-18); until it is set up production still uses
   the direct Gemini API on the FREE tier, which does not meet "approved providers only".
 
+## A receipt in another currency (owner, 2026-11-19)
+
+When the receipt's currency is not the company's, the amount comes back **converted** at
+Frankfurter's rate (https://frankfurter.dev, v1: the European Central Bank's reference rates, 30
+currencies, no key) - `minty_shared.fx` (minty-shared-py v0.8), after the read and outside the
+models' failover, so one call per read:
+
+- **The day:** the receipt's `document_date` (basis `receipt`); the report's day instead
+  (`report_date`) when the receipt's is empty, unreadable, in the future or more than a year from it.
+  The extract route takes the report's day as `transaction_date` (optional; absent = the company's
+  today, a non-date = 422). A weekend or holiday gets the previous business day's rate, and the day
+  Frankfurter names is the one kept.
+- **The amount:** original x rate, half up, 2 places; the 10,000,000 cap applies to the converted
+  amount (a receipt in another currency is taken as read up to 999,999,999,999). The answer carries
+  `exchange` - `{original_currency, original_amount, rate, rate_date, date_basis, source}`.
+- **No rate** (any error, a timeout of 5 s, a currency v1 doesn't have such as TWD): the amount
+  comes back empty, `exchange_failed: {currency}`, and the person types it. Nothing is blocked.
+- **The line keeps it:** adding a line (`POST /reports/expenses/lines`) or changing one
+  (`PATCH /expense-lines/{id}`) takes the six details back - `original_currency`, `original_amount`,
+  `exchange_rate`, `exchange_rate_date`, `exchange_rate_basis`, `exchange_rate_source` - and
+  `fx.saved_exchange` checks them: all six or none, another currency than the company's, a rate
+  above 0 for a day not after today, a known basis, Frankfurter, and original x rate giving the
+  line's amount; anything else is 422 "The exchange-rate details don't match this amount. Read the
+  receipt again or enter the amount yourself." Changing a line's amount without them clears them.
+  The web sends them only while the amount is still the converted one. Xero is unchanged: the line's
+  `amount` is the company-currency figure it always was.
+- `FX_API_URL` moves the address (default `https://api.frankfurter.dev/v1`). Tests:
+  `petty_cash/tests/test_expense_exchange.py`.
+
 ## Provider
 
 **Gemini through the direct API, paid tier** (a decision of 3 September 2026); the Vertex AI route

@@ -21,14 +21,16 @@ kill switch), the route's ``GEMINI_API_KEY``/``EXPENSE_AI_ALLOW_DIRECT_API``/
 from __future__ import annotations
 
 import logging
+from datetime import date
 from decimal import Decimal, InvalidOperation
 
 from minty_db.models import CurrencyInfo, Entity
-from minty_shared import ai
+from minty_shared import ai, fx
 from minty_shared.django import ai_allowance
 from minty_shared.model_input import prepare_for_model
 from pydantic import BaseModel, Field
 
+from petty_cash.days import today
 from petty_cash.services.expenses import expense_accounts, public_id, suppliers
 
 logger = logging.getLogger("petty-cash-api")
@@ -36,6 +38,9 @@ logger = logging.getLogger("petty-cash-api")
 CONFIG = ai.ReaderConfig("EXPENSE_AI")
 
 _MAX_AMOUNT = Decimal("10000000")
+# A receipt in another currency is capped only after conversion (``fx.exchange_for``); as read it
+# need only be a sane number (20,000,000 KRW is about HKD 112,000).
+_MAX_FOREIGN_AMOUNT = Decimal("999999999999")
 _MAX_DESCRIPTION = 200
 
 
@@ -196,17 +201,18 @@ def validate(parsed: ExpenseSuggestion, context: dict) -> dict:
             logger.info("receipt reader: dropped an account id not in the sent list")
         account_field = ai.field("", 0.0, CONFIG, {"account_id": "", "code": "", "name": ""})
 
-    amount_value = ""
-    try:
-        amount = Decimal(str(parsed.amount_value or 0)).quantize(Decimal("0.01"))
-        if Decimal("0") < amount <= _MAX_AMOUNT:
-            amount_value = format(amount, "f")
-    except (InvalidOperation, ValueError, TypeError):
-        amount_value = ""
-
     currency = (parsed.currency or "").strip().upper()
     if len(currency) != 3 or not currency.isalpha():
         currency = ""
+    foreign = bool(currency) and currency != context["entity"]["currency"]
+
+    amount_value = ""
+    try:
+        amount = Decimal(str(parsed.amount_value or 0)).quantize(Decimal("0.01"))
+        if Decimal("0") < amount <= (_MAX_FOREIGN_AMOUNT if foreign else _MAX_AMOUNT):
+            amount_value = format(amount, "f")
+    except (InvalidOperation, ValueError, TypeError):
+        amount_value = ""
 
     return {
         "supplier": supplier,
@@ -226,12 +232,14 @@ def reader_status(entity_id) -> dict:
     return ai_allowance.reader_status(CONFIG.enabled(), entity_id)
 
 
-def read_receipt(entity_id, user_id, data: bytes, mime: str) -> dict:
+def read_receipt(entity_id, user_id, data: bytes, mime: str, report_date: date | None = None) -> dict:
     """``{suggestions, reason, reader}`` for a receipt the route has checked (who asks, one
     PDF/JPEG/PNG by its bytes, at most 10 MB). ``suggestions`` is null on every failure; every
     outcome is the caller's 200. ``reader`` is the allowance after this read, so the page's count
     moves without another call. A read is reserved before the model is called and counts only if
-    a model answered (``ai_allowance``); a refusal before that point uses nothing."""
+    a model answered (``ai_allowance``); a refusal before that point uses nothing. A receipt in
+    another currency comes back converted (``fx.exchange_for``; ``report_date`` is the rate's day
+    when the receipt has none, the company's today when not given)."""
     if not CONFIG.enabled():
         return {"suggestions": None, "reason": ai.REASON_DISABLED, "reader": {"enabled": False}}
     policy = ai_allowance.load_policy()
@@ -259,7 +267,16 @@ def read_receipt(entity_id, user_id, data: bytes, mime: str) -> dict:
         # Even if something here raised, the reserved read is closed (failed, so never counted).
         ai_allowance.finish(read_id, result)
     ai.log_read(CONFIG, result, entity_id=entity_id, user_id=user_id)
-    return {**result.answer(), "reader": {"enabled": True, **ai_allowance.status(entity_id, policy).as_dict()}}
+    answer = result.answer()
+    if answer["suggestions"]:
+        # another currency: converted at Frankfurter's rate (owner, 2026-11-19) - after the read,
+        # outside the model's failover, so it is asked once
+        now = today()
+        answer["suggestions"] = fx.exchange_for(
+            answer["suggestions"], report_date=report_date or now, today=now, places=2, max_amount=_MAX_AMOUNT,
+            fetch=fx.frankfurter_rate,
+        )
+    return {**answer, "reader": {"enabled": True, **ai_allowance.status(entity_id, policy).as_dict()}}
 
 
 def _no_read(reason: str, entity_id, policy: ai_allowance.Policy) -> dict:

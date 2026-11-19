@@ -32,6 +32,7 @@ from minty_db.models import (
     ReportExpenseAttachment,
     XeroContactSync,
 )
+from minty_shared import fx
 
 from petty_cash.files import storage
 from petty_cash.money import cents
@@ -146,10 +147,17 @@ def _attachment_for(key: str, *, original_name: str, mime_type: str, file_size: 
     )
 
 
+#: ``update_expense``'s ``exchange``: leave a line's conversion details as they are, or clear them.
+KEEP_EXCHANGE = object()
+CLEAR_EXCHANGE: dict = dict.fromkeys(fx.COLUMNS)
+
+
 def add_expense(report: Report, user, *, amount: Decimal, description: str, supplier: XeroContactSync,
-                account: AccountInfo, receipt: bytes, receipt_mime: str, receipt_name: str) -> ReportExpense:
+                account: AccountInfo, receipt: bytes, receipt_mime: str, receipt_name: str,
+                exchange: dict | None = None) -> ReportExpense:
     """Store one line on ``report`` with its receipt, recompute the totals, log it. The receipt is
-    uploaded first; if the rows then fail, the upload is deleted again."""
+    uploaded first; if the rows then fail, the upload is deleted again. ``exchange``: how a receipt
+    in another currency was converted (the six ``fx.COLUMNS``, checked by the route), or None."""
     if report.status != ReportStatus.DRAFT:
         raise ExpenseRefused(NOT_A_DRAFT)
     amount = cents(amount)
@@ -165,7 +173,7 @@ def add_expense(report: Report, user, *, amount: Decimal, description: str, supp
                 raise ExpenseRefused(NOT_A_DRAFT)
             line = ReportExpense.objects.create(
                 report_id=locked.id, item=item, amount=amount, description=description,
-                account_id=account.id, contact_id=supplier.id,
+                account_id=account.id, contact_id=supplier.id, **(exchange or {}),
             )
             attachment = _attachment_for(key, original_name=receipt_name, mime_type=stored_mime,
                                          file_size=stored_size, uploaded_by=user.id)
@@ -234,12 +242,13 @@ KEEP_A_RECEIPT = "Every expense needs its receipt. Attach a new receipt before r
 
 def update_expense(report: Report, line: ReportExpense, user, *, amount: Decimal, description: str,
                    supplier: XeroContactSync | None, account: AccountInfo | None, receipt=None,
-                   remove_receipt_ids=()) -> ReportExpense:
+                   remove_receipt_ids=(), exchange=KEEP_EXCHANGE) -> ReportExpense:
     """Change a line of a DRAFT in place (Flask's ``update_expense``): the amount and description as
     given, ``supplier`` / ``account`` when they change (a new account renames the line), ``receipt``
     ``(bytes, mime, name)`` replacing the line's receipts, ``remove_receipt_ids`` dropping some - a
     line always keeps one. Recompute the totals and log it. The new receipt is uploaded first and
-    deleted again if the rows then fail; replaced or removed files leave the bucket after the commit."""
+    deleted again if the rows then fail; replaced or removed files leave the bucket after the commit.
+    ``exchange``: ``KEEP_EXCHANGE`` (as it is), ``CLEAR_EXCHANGE``, or the six details to store."""
     if report.status != ReportStatus.DRAFT:
         raise ExpenseRefused(NOT_A_DRAFT)
     amount = cents(amount)
@@ -265,6 +274,10 @@ def update_expense(report: Report, line: ReportExpense, user, *, amount: Decimal
             row = ReportExpense.objects.select_for_update().get(id=line.id)
             row.item, row.amount, row.description = item, amount, description
             fields = ["item", "amount", "description"]
+            if exchange is not KEEP_EXCHANGE:
+                for name, value in exchange.items():
+                    setattr(row, name, value)
+                fields += list(exchange)
             if supplier is not None:
                 row.contact_id = supplier.id
                 fields.append("contact_id")

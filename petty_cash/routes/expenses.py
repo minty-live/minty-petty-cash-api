@@ -10,8 +10,11 @@
 - ``PATCH /expense-lines/{id}`` (multipart): change that line - amount, description, supplier,
   account, its receipt replaced or some receipts removed - checked as adding is
   (``services/expenses.py::update_expense``, Flask's ``update_expense``).
-- ``POST /reports/expenses/extract`` (multipart ``receipt``): the model's suggestions for a line,
-  read here (``services/receipt_reader.py`` on ``minty_shared.ai``) - nothing is written.
+- ``POST /reports/expenses/extract`` (multipart ``receipt``, optional ``transaction_date``): the
+  model's suggestions for a line, read here (``services/receipt_reader.py`` on ``minty_shared.ai``) -
+  nothing is written. A receipt in another currency comes back converted (``exchange``, owner
+  2026-11-19); adding or changing a line takes those six details back (``fx.COLUMNS``), checked
+  against its amount by ``fx.saved_exchange`` - all or none, else 422.
 - ``GET /expense-lines/{id}/receipts/{attachment id}``: the receipt's bytes - by id, never by key.
 - ``PUT /reports/expenses`` ``{transaction_date, action}``: the step's Save & Next / Save & Exit.
 - ``POST /suppliers`` ``{name}``: a new supplier, created in the company's Xero organisation
@@ -36,11 +39,12 @@ from minty_db.models import (
     ReportExpenseAttachment,
     XeroContactSync,
 )
+from minty_shared import fx
 from ninja import Router
 
 from core.exceptions import Refused
 from core.policy import Permission, can_delete_report, can_view_report, has_permission
-from petty_cash.days import parse_day
+from petty_cash.days import parse_day, today
 from petty_cash.files.storage import read_receipt, sniff_mime
 from petty_cash.money import MAX_AMOUNT, cents, out
 from petty_cash.routes._input import (
@@ -53,7 +57,9 @@ from petty_cash.routes._input import (
 )
 from petty_cash.services import receipt_reader
 from petty_cash.services.expenses import (
+    CLEAR_EXCHANGE,
     KEEP_A_RECEIPT,
+    KEEP_EXCHANGE,
     NOT_A_DRAFT,
     ExpenseRefused,
     add_expense,
@@ -156,6 +162,15 @@ def _amount(raw) -> Decimal | None:
     return value if value.is_finite() and 0 < value <= MAX_AMOUNT else None
 
 
+def _exchange(entity_id, form, amount):
+    """The six details of a converted amount the save sent (``fx.saved_exchange``), or None."""
+    try:
+        return fx.saved_exchange(form, amount=amount, company_currency=currency_code(entity_id) or "", places=2,
+                                 today=today())
+    except fx.ExchangeRefusedError:
+        raise Refused(fx.EXCHANGE_REFUSED, 422) from None
+
+
 def _receipt(request) -> tuple[bytes, str, str]:
     """The uploaded receipt as ``(bytes, mime judged by the bytes, original name)``."""
     files = [f for f in request.FILES.getlist("receipt") if f and (f.name or "").strip()]
@@ -190,13 +205,14 @@ def add_expense_line(request):
     if account is None:
         raise Refused("Choose an account code from the list.", 422)
     data, mime, name = _receipt(request)
+    exchange = _exchange(entity_id, form, amount)
 
     draft = find_draft(entity_id, day)
     if draft is None:
         raise Refused(NO_DRAFT, 409, to="opening")
     try:
         line = add_expense(draft, request.auth_user, amount=amount, description=description, supplier=supplier,
-                           account=account, receipt=data, receipt_mime=mime, receipt_name=name)
+                           account=account, receipt=data, receipt_mime=mime, receipt_name=name, exchange=exchange)
     except ExpenseRefused as refused:
         raise Refused(refused.message, 409) from None
     return JsonResponse({"line": lines_payload([line])[0], "total": out(draft.expense_total)}, status=201)
@@ -280,9 +296,15 @@ def edit_expense_line(request, line_id: str):
     if receipt is None and held and held <= set(remove):
         raise Refused(KEEP_A_RECEIPT, 422)
 
+    # a converted amount's details: new ones replace the line's; an amount changed without them
+    # clears them (they no longer describe it); otherwise the line keeps what it has
+    exchange = _exchange(entity_id, form, amount)
+    if exchange is None:
+        exchange = CLEAR_EXCHANGE if cents(amount) != cents(line.amount) else KEEP_EXCHANGE
+
     try:
         line = update_expense(report, line, request.auth_user, amount=amount, description=description, supplier=supplier,
-                              account=account, receipt=receipt, remove_receipt_ids=remove)
+                              account=account, receipt=receipt, remove_receipt_ids=remove, exchange=exchange)
     except ExpenseRefused as refused:
         raise Refused(refused.message, 409) from None
     return {"line": lines_payload([line])[0], "total": out(report.expense_total)}
@@ -329,7 +351,13 @@ def extract_expense(request):
         data, mime, _ = checked_receipt(uploads[0])
     except ExpenseRefused as refused:
         raise Refused(refused.message, 422) from None
-    return JsonResponse(receipt_reader.read_receipt(request.company.id, request.auth_user.id, data, mime))
+    report_date = None
+    if request.POST.get("transaction_date"):
+        report_date = parse_day(request.POST.get("transaction_date"))
+        if report_date is None:
+            raise Refused(BAD_DATE, 422)
+    return JsonResponse(receipt_reader.read_receipt(request.company.id, request.auth_user.id, data, mime,
+                                                    report_date=report_date))
 
 @router.put("/reports/expenses")
 def save_expenses_step_route(request):
