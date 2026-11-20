@@ -7,13 +7,18 @@
     python manage.py ai_policy --set-models gemini-3.8-flash gemini-3.1-pro-preview
     python manage.py ai_policy --set-models gemini-3.8-flash --no-backup
     python manage.py ai_policy --set-rules '[{"reads": 20, "period_days": 1}]'
+    python manage.py ai_policy --receipt-reader off --invoice-reader on      # the readers' switches
+    python manage.py ai_policy --timeout-s 30 --max-output-tokens 6000 --thinking-level medium --max-file-mb 10
+    python manage.py ai_policy --location asia-southeast1 --set-models gemini-3.5-flash --no-backup  # region + its model
 
 minty-db's ``ai_policy`` row and ``ai_grant`` rows (owner, 2026-11-18) are shared by Petty Cash and
 Payment Request, and both services read them on every read: a change here takes effect on the next
 read, no restart. A company reads against its grants; ``default_grant`` is the one it is given
 automatically, once, on its first read; ``--grant`` gives it another (a top-up, or a different
-size). A change is checked first (``minty_shared.django.ai_allowance``) and refused with the reason,
-so a typo cannot switch reading off. An UPDATE in SQL does the same, unchecked.
+size). The readers' switches and their timeout, token budget, thinking level and largest document
+are in the same row (owner, 2026-11-20; they were each service's environment). A change is checked
+first (``minty_shared.django.ai_allowance``) and refused with the reason, so a typo cannot switch
+reading off. An UPDATE in SQL does the same, unchecked.
 """
 
 from __future__ import annotations
@@ -28,7 +33,8 @@ from minty_shared.django import ai_allowance
 
 
 class Command(BaseCommand):
-    help = "Show or change the AI readers' models, default grant and caps (ai_policy), and give grants."
+    help = ("Show or change the AI readers' models, switches, limits, default grant and caps (ai_policy), "
+            "and give grants.")
 
     def add_arguments(self, parser):
         parser.add_argument("--set-models", nargs="+", metavar="MODEL",
@@ -38,6 +44,14 @@ class Command(BaseCommand):
                             help='the one-time grant every company gets, e.g. \'{"tokens": 10000}\', or null')
         parser.add_argument("--set-rules", metavar="JSON",
                             help='extra caps over every company, e.g. \'[{"reads": 20, "period_days": 1}]\'')
+        parser.add_argument("--receipt-reader", choices=("on", "off"), help="Petty Cash's receipt reader")
+        parser.add_argument("--invoice-reader", choices=("on", "off"), help="Payment Request's invoice reader")
+        parser.add_argument("--timeout-s", type=int, help="each model call's limit in seconds (5-120)")
+        parser.add_argument("--max-output-tokens", type=int, help="the reply's budget, thinking included (256-65536)")
+        parser.add_argument("--thinking-level", help="minimal, low, medium or high")
+        parser.add_argument("--max-file-mb", type=int, help="the largest document read (1-20 MB)")
+        parser.add_argument("--location", help="the Vertex AI region, e.g. asia-southeast1 (it decides which "
+                                               "models exist: change the models with it)")
         parser.add_argument("--grant", metavar="ENTITY_ID", help="give this company a grant (with --tokens/--reads)")
         parser.add_argument("--tokens", type=int, help="with --grant: the tokens it gives")
         parser.add_argument("--reads", type=int, help="with --grant: the reads it gives")
@@ -48,7 +62,8 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         row = AiPolicy.objects.filter(id=1).first()
-        changing = options["set_models"] or options["set_rules"] or options["set_default_grant"] is not None
+        changing = (options["set_models"] or options["set_rules"] or options["set_default_grant"] is not None
+                    or bool(_settings_given(options)))
         if changing:
             if row is None:
                 raise CommandError("There is no ai_policy row. Load seed_catalogue.sql (or minty-db's "
@@ -73,8 +88,9 @@ class Command(BaseCommand):
             rules = _json(options["set_rules"], "--set-rules")
         if options["set_default_grant"] is not None:
             default_grant = _json(options["set_default_grant"], "--set-default-grant")
+        settings = {key: getattr(row, key) for key in ai_allowance.SETTING_FIELDS} | _settings_given(options)
         try:
-            policy = ai_allowance.parse_policy(primary, backup, rules, default_grant)
+            policy = ai_allowance.parse_policy(primary, backup, rules, default_grant, settings)
         except ai_allowance.PolicyError as exc:
             raise CommandError(f"Not changed: {exc}") from None
         if backup and backup == primary:
@@ -85,7 +101,7 @@ class Command(BaseCommand):
                                    f"({', '.join(sorted(ai.APPROVED_PROVIDERS))}).")
         AiPolicy.objects.filter(id=1).update(primary_model=policy.primary_model, backup_model=policy.backup_model,
                                              limit_rules=rules, default_grant=default_grant,
-                                             updated_by=options["by"])
+                                             updated_by=options["by"], **settings)
         self.stdout.write(self.style.SUCCESS("ai_policy changed - it applies from the next read."))
 
     def _grant(self, options) -> None:
@@ -107,6 +123,11 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR("ai_policy: missing or unusable - AI reading is OFF."))
             return
         self.stdout.write(f"models        : {' -> '.join(policy.models)}")
+        s = policy.settings
+        self.stdout.write(f"readers       : receipt {_on(s.receipt_reader_on)}, invoice {_on(s.invoice_reader_on)}")
+        self.stdout.write(f"limits        : timeout {s.timeout_s} s, {s.max_output_tokens} output tokens, "
+                          f"thinking {s.thinking_level}, files up to {s.max_file_mb} MB")
+        self.stdout.write(f"region        : {s.location} (Vertex AI)")
         self.stdout.write(f"default grant : {json.dumps(_spec(policy.default_grant))}")
         self.stdout.write(f"extra caps    : {json.dumps([_rule(r) for r in policy.rules])}")
         if entity_id:
@@ -134,6 +155,22 @@ class Command(BaseCommand):
         for t in top:
             self.stdout.write(f"  {names.get(t['entity_id'], t['entity_id'])}: {t['reads']} / {t['failed']} / "
                               f"{t['tokens'] or 0}")
+
+
+def _settings_given(options) -> dict:
+    """The reader settings this run changes, by their ``ai_policy`` column."""
+    given = {}
+    for flag, column in (("receipt_reader", "receipt_reader_on"), ("invoice_reader", "invoice_reader_on")):
+        if options.get(flag) is not None:
+            given[column] = options[flag] == "on"
+    for column in ("timeout_s", "max_output_tokens", "thinking_level", "max_file_mb", "location"):
+        if options.get(column) is not None:
+            given[column] = options[column]
+    return given
+
+
+def _on(value: bool) -> str:
+    return "on" if value else "off"
 
 
 def _json(text: str, flag: str):

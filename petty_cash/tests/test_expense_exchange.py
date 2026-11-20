@@ -15,7 +15,7 @@ from minty_db.models import ReportExpense
 from minty_shared import fx
 
 from petty_cash.tests.conftest import headers, url
-from petty_cash.tests.test_expense_extract import FakeInteraction, _reply, model  # noqa: F401 - the model fixture
+from petty_cash.tests.test_expense_extract import FakeResponse, _reply, model  # noqa: F401 - the model fixture
 from petty_cash.tests.test_expenses import D3, PNG, _add, _draft, _line, lists, s3  # noqa: F401 - fixtures
 
 pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("lists")]
@@ -38,7 +38,7 @@ def rates(monkeypatch):
 
 
 def _extract(client, shop, model, *, day=D3, **reply):
-    model.answer = FakeInteraction(_reply(**reply))
+    model.answer = FakeResponse(_reply(**reply))
     form = {"receipt": SimpleUploadedFile("slip.jpg", PNG, content_type="image/jpeg")}
     if day is not None:
         form["transaction_date"] = day.isoformat()
@@ -86,7 +86,7 @@ def test_without_the_report_s_day_the_company_s_today_is_used(client, shop, mode
 
 
 def test_a_day_that_is_not_a_date_is_refused(client, shop, model, rates):
-    model.answer = FakeInteraction(_reply())
+    model.answer = FakeResponse(_reply())
     resp = client.post(url(shop.entity.id, "/reports/expenses/extract"),
                        {"receipt": SimpleUploadedFile("slip.jpg", PNG, content_type="image/jpeg"),
                         "transaction_date": "yesterday"}, headers=headers(shop.owner.id))

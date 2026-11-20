@@ -1,7 +1,7 @@
 """``python manage.py expense_ai_check`` - one round trip to the model, from where the code runs.
 
 Moved from Flask's ``flask expense-ai check`` (2026-11-04). It sends a tiny generated image, never a
-customer receipt, and prints the route, the models (``ai_policy``'s, in order), which one answered,
+customer receipt, and prints the route (Vertex AI: its project and region), the models (``ai_policy``'s, in order), which one answered,
 the latency and the token usage, so "is this
 configured correctly" is a fact rather than a guess. Exits 1 when the model did not answer.
 """
@@ -28,24 +28,17 @@ class Command(BaseCommand):
     help = "One round-trip call to the receipt reader's model (a generated image, no customer data)."
 
     def handle(self, *args, **options):
-        config = rr.CONFIG
-        self.stdout.write(f"enabled          : {config.enabled()}")
-        self.stdout.write(f"route            : {'Vertex AI' if ai.uses_vertex() else 'direct Gemini API'}")
-        self.stdout.write(f"location         : {ai.location()}")
+        self.stdout.write("route            : Vertex AI")
+        self.stdout.write(f"project          : {ai.project() or '- (GOOGLE_CLOUD_PROJECT is not set)'}")
         policy = ai_allowance.load_policy()
-        models = policy.models if policy else [config.model_id()]
         if policy is None:
-            self.stdout.write(self.style.WARNING(
-                "WARNING: no usable ai_policy row - the readers are OFF; checking EXPENSE_AI_MODEL instead."
-            ))
+            raise CommandError("No usable ai_policy row - the readers are OFF and there is no model to check.")
+        config = policy.reader(ai_allowance.READER_RECEIPT)
+        models = policy.models
+        self.stdout.write(f"location         : {config.location}")
+        self.stdout.write(f"receipt reader   : {'on' if config.enabled else 'off'}")
         self.stdout.write(f"models           : {', '.join(models)}")
-        self.stdout.write(f"thinking_level   : {config.thinking_level()}")
-        if not ai.uses_vertex():
-            self.stdout.write(self.style.WARNING(
-                "WARNING: the direct Gemini API has no regional endpoint and no residency commitment. "
-                "On the free tier Google may use submitted content to develop its products and human "
-                "reviewers may read it. Use non-customer receipts only."
-            ))
+        self.stdout.write(f"thinking_level   : {config.thinking_level}")
 
         buffer = io.BytesIO()
         Image.new("RGB", (2, 2), (255, 255, 255)).save(buffer, format="PNG")

@@ -143,7 +143,8 @@ def notes(shop) -> dict:
 @pytest.fixture
 def ai_policy(db) -> AiPolicy:
     """minty-db's one ``ai_policy`` row (seed_catalogue.sql writes it in a real database): one
-    model, no backup, the preview's one-time grant of 10,000 tokens per company and no extra caps.
-    A test changes it as an operator would."""
+    model, no backup, the preview's one-time grant of 10,000 tokens per company, no extra caps, and
+    the receipt reader on with the columns' own limits (owner, 2026-11-20: the switch is the row's,
+    not the environment's). A test changes it as an operator would."""
     return AiPolicy.objects.create(id=1, primary_model="gemini-3.8-flash", backup_model=None,
-                                   default_grant={"tokens": 10000}, limit_rules=[])
+                                   default_grant={"tokens": 10000}, limit_rules=[], receipt_reader_on=True)

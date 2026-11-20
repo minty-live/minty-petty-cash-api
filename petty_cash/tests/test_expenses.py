@@ -17,6 +17,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from minty_db.enums import EntityRole
 from minty_db.models import (
     AccountInfo,
+    AiPolicy,
     Attachment,
     EntityAccountXero,
     Report,
@@ -140,16 +141,18 @@ def test_the_page_brings_the_lines_and_what_a_line_may_use(client, shop, lists, 
     assert body["permissions"] == {"create_supplier": True}
 
 
-@pytest.mark.parametrize(("switch", "enabled"), [("true", True), ("false", False), (None, False)])
-def test_the_page_says_whether_the_receipt_reader_is_on(client, shop, lists, ai_policy, monkeypatch, switch,
-                                                         enabled):
-    """The app offers "Read with AI" only when ``EXPENSE_AI_ENABLED`` is on (off unless set), with
-    the company's reads left (shared with Payment Request); a switched-off reader sends no count."""
+@pytest.mark.parametrize(("switch", "enabled"), [(True, True), (False, False), (None, False)])
+def test_the_page_says_whether_the_receipt_reader_is_on(client, shop, lists, ai_policy, switch, enabled):
+    """The app offers "Read with AI" only when ``ai_policy.receipt_reader_on`` is on (owner, 2026-11-20;
+    off by the column's default), with the company's reads left (shared with Payment Request); a
+    switched-off reader sends no count. The invoice reader's switch is not this page's."""
     _draft(shop)
     if switch is None:
-        monkeypatch.delenv("EXPENSE_AI_ENABLED", raising=False)
+        AiPolicy.objects.filter(id=1).delete()
+        AiPolicy.objects.create(id=1, primary_model="gemini-3.8-flash", default_grant={"tokens": 10000},
+                                limit_rules=[], invoice_reader_on=True)
     else:
-        monkeypatch.setenv("EXPENSE_AI_ENABLED", switch)
+        AiPolicy.objects.filter(id=1).update(receipt_reader_on=switch)
 
     resp = _get(client, shop)
 

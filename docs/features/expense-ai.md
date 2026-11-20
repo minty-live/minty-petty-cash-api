@@ -13,7 +13,7 @@ shares with minty-payment-request-api's invoice reader. The answer to the web is
 
 ## Where it lives
 
-- `GET /reports/expenses` carries `reader` (`EXPENSE_AI_ENABLED` and a usable `ai_policy`, read on
+- `GET /reports/expenses` carries `reader` (a usable `ai_policy` with `receipt_reader_on`, read on
   the call, with the company's AI allowance left - below): the app offers "Read receipt" only
   when it is on. Switched off it is `{"enabled": false}` alone.
 - `POST /reports/expenses/extract` (`petty_cash/routes/expenses.py::extract_expense`) - who may
@@ -82,8 +82,9 @@ minty-petty-cash-api's `python manage.py ai_policy`, never a release:
   after a spent grant reads 100%). Used up, the route answers `limit_reached` without asking the
   model and the page disables the button.
 - The in-process `RateLimiter` and `*_RATE_USER_PER_MIN`/`*_RATE_ENTITY_PER_HOUR` are gone (replaced).
-- **Production:** the owner chose Vertex AI (2026-11-18); until it is set up production still uses
-  the direct Gemini API on the FREE tier, which does not meet "approved providers only".
+- **Production:** Vertex AI in `asia-southeast1` (owner, 2026-11-20; below) once minty-shared v0.11
+  is released; until then production still uses the direct Gemini API on the FREE tier, which does
+  not meet "approved providers only".
 
 ## The prompt (owner, 2026-11-20: "simple like this first")
 
@@ -135,26 +136,33 @@ models' failover, so one call per read:
 
 ## Provider
 
-**Gemini through the direct API, FREE tier, in both environments** (`EXPENSE_AI_DIRECT_TIER=free`,
-`minty-infra/terraform.tfvars`). The owner chose Vertex AI (Google Cloud project `minty-515207`,
-`asia-southeast1`) on 2026-11-20 and deferred it the same day: the route is implemented and is
-selected automatically when `GOOGLE_CLOUD_PROJECT` is set (with a service-account key file, which
-does not exist yet). The free tier does not meet "approved providers only" - on it Google may use
-submitted content and human reviewers may read it - so decide before customers' receipts are read.
-Because the SDK cannot tell the tiers apart, the tier is stated in configuration and the engine
-shouts when Google's quota errors contradict it.
+**Gemini on Vertex AI, `asia-southeast1` (Singapore), project `minty-515207`** (owner,
+2026-11-20; minty-shared v0.11). The direct Gemini API is gone - Google AI Studio does not serve
+Hong Kong, and Vertex keeps the processing in the region the services run in. The call is
+`models.generate_content`: Vertex serves `interactions.create` only in `global`, `us` and `eu`. In
+`asia-southeast1` only `gemini-3.5-flash` answered on 2026-11-20 (`3.5-flash-lite` and `3.8-flash`
+404 there), so that is the policy's model, with no backup. The service account `minty-ai` (role
+Vertex AI User) authenticates by its JSON key file. Verified that day with `expense_ai_check`: a
+round trip in 3.6 s. **Not yet on Render**: production and development still run the released
+code on the direct Gemini API's free tier until v0.11 ships with the key file.
 
 ## Configuration
 
-| Variable | Meaning |
-|---|---|
-| `EXPENSE_AI_ENABLED` | off unless on - the expenses page says `reader.enabled: false` (no button), the route answers `disabled` and the app shows no suggestions |
-| `ai_policy` (database) | the models (primary, backup) and the limit rules - above |
-| `EXPENSE_AI_MODEL` | only when no models are given (the check command without a policy row) |
-| `EXPENSE_AI_THINKING_LEVEL` (`low`), `EXPENSE_AI_MAX_OUTPUT_TOKENS` (4096), `EXPENSE_AI_TIMEOUT_S` (25, per model tried) | the call |
-| `EXPENSE_AI_CONF_HIGH`, `EXPENSE_AI_CONF_MEDIUM` | unused by this reader since the simple prompt (no confidence is asked) |
-| `EXPENSE_AI_MAX_FILE_MB` (10) | the receipt size cap |
-| `GEMINI_API_KEY`, `EXPENSE_AI_ALLOW_DIRECT_API`, `EXPENSE_AI_DIRECT_TIER`, `EXPENSE_AI_USE_VERTEX`, `EXPENSE_AI_LOCATION`, `GOOGLE_CLOUD_PROJECT` | the route and the tier assertion - shared by every reader |
+| Where | Setting | Meaning |
+|---|---|---|
+| `ai_policy` (database) | `receipt_reader_on` | off unless on - the expenses page says `reader.enabled: false` (no button), the route answers `disabled` and the app shows no suggestions. Payment Request's `invoice_reader_on` is its own |
+| `ai_policy` | `primary_model`, `backup_model` | the models tried, in order - above |
+| `ai_policy` | `timeout_s` (25, per model tried), `max_output_tokens` (4096, thinking included), `thinking_level` (`low`) | the call |
+| `ai_policy` | `max_file_mb` (10) | the receipt size cap |
+| `ai_policy` | `location` (`asia-southeast1`) | the Vertex AI region - it decides which models exist, so change the models with it (`--location`) |
+| environment | `GOOGLE_CLOUD_PROJECT` | Vertex AI's project (`minty-515207`); without it, no call is made (`not_configured`) |
+| environment | `GOOGLE_APPLICATION_CREDENTIALS` | the service account's key file (locally `C:\Github\vertex-minty-ai.json`; on Render a secret file) |
+
+Every `ai_policy` setting is changed with `python manage.py ai_policy` (`--receipt-reader on|off`,
+`--invoice-reader on|off`, `--timeout-s`, `--max-output-tokens`, `--thinking-level`,
+`--max-file-mb`, `--set-models`), checked against the columns' ranges first; it applies to both
+services from the next read. The old `EXPENSE_AI_*`, `BILL_AI_*` and `GEMINI_API_KEY` variables
+are read by nothing.
 
 ## Tests
 

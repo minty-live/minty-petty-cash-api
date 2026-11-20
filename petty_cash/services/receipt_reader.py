@@ -14,9 +14,10 @@ Brain 2, Minty, supplies the company's chart of accounts and suppliers; Brain 3,
 the final authority - nothing here writes any record. Every failure is "no suggestion" with a
 reason, and the line is typed by hand as before.
 
-Configuration: ``EXPENSE_AI_*`` (``minty_shared.ai.ReaderConfig``; ``EXPENSE_AI_ENABLED`` is the
-kill switch), the route's ``GEMINI_API_KEY``/``EXPENSE_AI_ALLOW_DIRECT_API``/
-``EXPENSE_AI_DIRECT_TIER``, and the ``ai_policy`` row (models and limit rules).
+Configuration: the ``ai_policy`` row (owner, 2026-11-20) - ``receipt_reader_on`` is the switch, and
+the models, the Vertex AI region, the timeout, the token budget, the thinking level and the
+largest receipt are there too (``ai_allowance.Policy.reader``). The environment names only Vertex
+AI's project, ``GOOGLE_CLOUD_PROJECT``, with ``GOOGLE_APPLICATION_CREDENTIALS``.
 """
 
 from __future__ import annotations
@@ -34,8 +35,6 @@ from petty_cash.days import today
 from petty_cash.services.expenses import expense_accounts, public_id, suppliers
 
 logger = logging.getLogger("petty-cash-api")
-
-CONFIG = ai.ReaderConfig("EXPENSE_AI")
 
 _MAX_AMOUNT = Decimal("10000000")
 # A receipt in another currency is capped only after conversion (``fx.exchange_for``); as read it
@@ -159,7 +158,7 @@ def _iso_date(value: object) -> str:
 
 def reader_status(entity_id) -> dict:
     """The page's ``reader``: whether "Read with AI" is offered, and the company's reads left."""
-    return ai_allowance.reader_status(CONFIG.enabled(), entity_id)
+    return ai_allowance.reader_status(ai_allowance.READER_RECEIPT, entity_id)
 
 
 def read_receipt(entity_id, user_id, data: bytes, mime: str, report_date: date | None = None) -> dict:
@@ -170,12 +169,13 @@ def read_receipt(entity_id, user_id, data: bytes, mime: str, report_date: date |
     a model answered (``ai_allowance``); a refusal before that point uses nothing. A receipt in
     another currency comes back converted (``fx.exchange_for``; ``report_date`` is the rate's day
     when the receipt has none, the company's today when not given)."""
-    if not CONFIG.enabled():
-        return {"suggestions": None, "reason": ai.REASON_DISABLED, "reader": {"enabled": False}}
     policy = ai_allowance.load_policy()
     if policy is None:
         return {"suggestions": None, "reason": ai.REASON_NOT_CONFIGURED, "reader": {"enabled": False}}
-    if len(data) > CONFIG.max_file_bytes():
+    config = policy.reader(ai_allowance.READER_RECEIPT)
+    if not config.enabled:
+        return {"suggestions": None, "reason": ai.REASON_DISABLED, "reader": {"enabled": False}}
+    if len(data) > config.max_file_bytes:
         return _no_read(ai.REASON_FILE_TOO_LARGE, entity_id, policy)
     context = build_context(entity_id)
     if context is None:
@@ -190,14 +190,14 @@ def read_receipt(entity_id, user_id, data: bytes, mime: str, report_date: date |
     try:
         document, document_mime = prepare_for_model(data, mime)
         instruction, prefix, aliases = prompt(context)
-        result = ai.read(document, document_mime, config=CONFIG, instruction=instruction,
+        result = ai.read(document, document_mime, config=config, instruction=instruction,
                          prefix_text=prefix, closing_text=ai_prompt.CLOSING, reply_model=Reading,
                          validate=lambda parsed: validate(parsed, context, aliases),
                          models=policy.models)
     finally:
         # Even if something here raised, the reserved read is closed (failed, so never counted).
         ai_allowance.finish(read_id, result)
-    ai.log_read(CONFIG, result, entity_id=entity_id, user_id=user_id)
+    ai.log_read(config, result, entity_id=entity_id, user_id=user_id)
     answer = result.answer()
     if answer["suggestions"]:
         # another currency: converted at Frankfurter's rate (owner, 2026-11-19) - after the read,

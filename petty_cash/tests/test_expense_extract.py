@@ -11,6 +11,7 @@ import json
 import re
 import threading
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -42,32 +43,34 @@ def _reply(**over) -> str:
 
 
 class FakeUsage:
-    total_input_tokens = 5000
-    total_output_tokens = 300
-    total_thought_tokens = 400
-    total_cached_tokens = 0
+    prompt_token_count = 5000
+    candidates_token_count = 300
+    thoughts_token_count = 400
+    cached_content_token_count = 0
 
 
-class FakeInteraction:
-    def __init__(self, output_text=None, status="completed"):
-        self.id = "interaction-1"
-        self.output_text = output_text
-        self.status = status
-        self.errors = []
-        self.usage = FakeUsage()
+class FakeResponse:
+    """A ``generate_content`` reply: one candidate holding ``text``, ended by ``finish``."""
+
+    def __init__(self, text=None, finish="STOP"):
+        self.response_id = "response-1"
+        self.usage_metadata = FakeUsage()
+        self.prompt_feedback = None
+        parts = [SimpleNamespace(text=text, thought=None)] if text is not None else []
+        self.candidates = [SimpleNamespace(finish_reason=finish, content=SimpleNamespace(parts=parts))]
 
 
 class FakeModel:
-    """The google-genai client's ``interactions.create``. ``by_model`` answers one model its own
+    """The Vertex AI client's ``models.generate_content``. ``by_model`` answers one model its own
     way (the failover); every other model gets ``answer``."""
 
     def __init__(self):
-        self.answer = FakeInteraction(_reply())
+        self.answer = FakeResponse(_reply())
         self.by_model = {}
         self.requests = []
-        self.interactions = self
+        self.models = self
 
-    def create(self, **request):
+    def generate_content(self, **request):
         self.requests.append(request)
         answer = self.by_model.get(request["model"], self.answer)
         if isinstance(answer, Exception):
@@ -75,14 +78,17 @@ class FakeModel:
         return answer
 
 
+def _parts(request) -> list:
+    """The request's parts in order: the company's lists, the receipt, the closing."""
+    (content,) = request["contents"]
+    return content.parts
+
+
 @pytest.fixture
 def model(monkeypatch, ai_policy) -> FakeModel:
     fake = FakeModel()
-    monkeypatch.setattr(ai, "get_client", lambda timeout_s: fake)
+    monkeypatch.setattr(ai, "get_client", lambda timeout_s, region: fake)
     monkeypatch.setattr(ai.time, "sleep", lambda _s: None)
-    for name, value in {"EXPENSE_AI_ENABLED": "true", "EXPENSE_AI_CONF_HIGH": "0.85",
-                        "EXPENSE_AI_CONF_MEDIUM": "0.60"}.items():
-        monkeypatch.setenv(name, value)
     return fake
 
 
@@ -126,15 +132,15 @@ def test_a_receipt_is_read_against_the_company_s_own_lists(client, shop, model):
     assert s["amount"]["value"] == "120.00" and s["description"]["value"] == "Flyers"
     assert s["document_date"]["value"] == "2026-08-28"
     assert (s["currency"], s["entity_currency"]) == ("HKD", "HKD")
-    # the model read the bytes as sent, typed by the bytes (a PNG named .jpg sent as image/jpeg)
+    # the model read the bytes as sent, typed by the bytes (a PNG uploaded as image/jpeg goes as image/png)
     [request] = model.requests
-    assert request["input"][1]["type"] == "image"
+    assert _parts(request)[1].inline_data.mime_type == "image/png"
 
 
 def test_the_prefix_carries_only_what_a_line_can_use_in_a_stable_order(client, shop, model):
     _extract(client, shop)
 
-    prefix = model.requests[0]["input"][0]["text"]
+    prefix = _parts(model.requests[0])[0].text
     assert prefix.startswith("## Entity\n")
     assert "Base currency: HKD" in prefix
     assert "acc_01 | 400 | Advertising" in prefix
@@ -143,19 +149,22 @@ def test_the_prefix_carries_only_what_a_line_can_use_in_a_stable_order(client, s
     assert prefix.index("con_01 | ABC Supplies") < prefix.index("con_02 | Taxi Co")
     # short ids only: the company's own ids never reach the model
     assert "acc-0001" not in prefix and "con-0001" not in prefix
-    assert model.requests[0]["system_instruction"] == ai_prompt.instruction("receipt")
-    assert "acc_01" not in json.dumps(model.requests[0]["response_format"]["schema"])
+    assert model.requests[0]["config"].system_instruction == ai_prompt.instruction("receipt")
+    assert "acc_01" not in json.dumps(model.requests[0]["config"].response_json_schema)
 
 
-@pytest.mark.parametrize("env, reason", [
-    ({"EXPENSE_AI_ENABLED": "false"}, "disabled"),
-    ({"EXPENSE_AI_MAX_FILE_MB": "0"}, "file_too_large"),
+#: A PNG just over 1 MB - ``ai_policy.max_file_mb`` is at least 1.
+BIG_PNG = PNG + b"0" * (1024 * 1024)
+
+
+@pytest.mark.parametrize("policy, receipt, reason", [
+    ({"receipt_reader_on": False}, PNG, "disabled"),
+    ({"max_file_mb": 1}, BIG_PNG, "file_too_large"),
 ], ids=["off", "too-large"])
-def test_refusals_past_the_checks_are_a_silent_no_suggestion(client, shop, model, monkeypatch, env, reason):
-    for name, value in env.items():
-        monkeypatch.setenv(name, value)
+def test_refusals_past_the_checks_are_a_silent_no_suggestion(client, shop, model, policy, receipt, reason):
+    _policy(**policy)
 
-    resp = _extract(client, shop)
+    resp = _extract(client, shop, receipt=receipt)
 
     body = resp.json()
     assert resp.status_code == 200 and (body["suggestions"], body["reason"]) == (None, reason)
@@ -188,7 +197,7 @@ def test_one_log_line_with_numbers_and_never_the_values(client, shop, model, cap
 
     _extract(client, shop)
 
-    [line] = [r.getMessage() for r in caplog.records if "expense_ai: extract" in r.getMessage()]
+    [line] = [r.getMessage() for r in caplog.records if "receipt_ai: extract" in r.getMessage()]
     assert f"entity={shop.entity.id}" in line and "tokens_in=5000" in line and "status=ok" in line
     assert "model=gemini-3.8-flash attempts=gemini-3.8-flash:ok" in line
     # the ids are random: one holding "120" once failed CI (2026-11-11), so they go before the check
@@ -237,7 +246,7 @@ def test_who_may_ask_is_decided_here(client, shop, model):
 
 
 def _read(client, shop, model, **reply):
-    model.answer = FakeInteraction(_reply(**reply))
+    model.answer = FakeResponse(_reply(**reply))
     body = _extract(client, shop).json()
     return body["suggestions"], body["reason"]
 
@@ -316,7 +325,7 @@ def test_the_instruction_is_the_owners_simple_prompt(shop):
 def test_the_check_command_sends_a_generated_image_and_reports_the_round_trip(model, capsys):
     from django.core.management import call_command
 
-    model.answer = FakeInteraction(_reply(**EMPTY))
+    model.answer = FakeResponse(_reply(**EMPTY))
     call_command("expense_ai_check")
 
     out = capsys.readouterr().out
@@ -324,8 +333,10 @@ def test_the_check_command_sends_a_generated_image_and_reports_the_round_trip(mo
     assert "answered by      : gemini-3.8-flash" in out
     assert "tokens in / out  : 5000 / 300" in out
     [request] = model.requests
-    assert request["input"][1]["mime_type"] == "image/png"
-    assert "Connectivity check" in request["input"][0]["text"]
+    assert _parts(request)[1].inline_data.mime_type == "image/png"
+    assert "Connectivity check" in _parts(request)[0].text
+    assert "route            : Vertex AI" in out and "receipt reader   : on" in out
+    assert "location         : asia-southeast1" in out
 
 
 def test_the_check_command_fails_loudly_when_the_model_does_not_answer(model):
@@ -392,7 +403,7 @@ def test_an_expired_grant_no_longer_counts(client, shop, model):
 
 
 def test_a_failed_read_uses_none_of_the_grant_but_its_tokens_are_recorded(client, shop, model):
-    model.answer = FakeInteraction("{not json")
+    model.answer = FakeResponse("{not json")
 
     body = _extract(client, shop).json()
 
@@ -404,7 +415,7 @@ def test_a_failed_read_uses_none_of_the_grant_but_its_tokens_are_recorded(client
 
 
 def test_nothing_usable_is_still_a_read(client, shop, model):
-    model.answer = FakeInteraction(_reply(**EMPTY))
+    model.answer = FakeResponse(_reply(**EMPTY))
 
     body = _extract(client, shop).json()
 
@@ -441,7 +452,7 @@ def test_the_backup_answers_when_the_primary_fails_and_the_row_says_so(client, s
     [row] = AiRead.objects.filter(entity_id=shop.entity.id)
     assert (row.status, row.model_answered) == ("ok", "gemini-3.8-flash")
     assert row.attempts == "gemini-3.5-flash-lite:timeout>gemini-3.8-flash:ok"
-    [line] = [r.getMessage() for r in caplog.records if "expense_ai: extract" in r.getMessage()]
+    [line] = [r.getMessage() for r in caplog.records if "receipt_ai: extract" in r.getMessage()]
     assert "model=gemini-3.8-flash attempts=gemini-3.5-flash-lite:timeout>gemini-3.8-flash:ok" in line
 
 
@@ -575,6 +586,11 @@ def test_the_policy_command_gives_a_company_a_grant(ai_policy, shop, capsys):
     (["--set-default-grant", '{"days": 30}'], "gives nothing"),
     (["--set-models", "openai:gpt-6.1-terra"], "approved provider"),
     (["--set-models", "gemini-3.8-flash", "gemini-3.8-flash"], "different model"),
+    (["--timeout-s", "200"], "at most 120"),
+    (["--max-output-tokens", "100"], "max_output_tokens"),
+    (["--thinking-level", "extreme"], "thinking_level"),
+    (["--max-file-mb", "50"], "at most 20"),
+    (["--location", "Asia Southeast1"], "location"),
 ])
 def test_the_policy_command_refuses_a_change_that_would_break_reading(ai_policy, args, says):
     from django.core.management import CommandError, call_command
@@ -583,6 +599,28 @@ def test_the_policy_command_refuses_a_change_that_would_break_reading(ai_policy,
         call_command("ai_policy", *args)
     ai_policy.refresh_from_db()
     assert (ai_policy.primary_model, ai_policy.default_grant) == ("gemini-3.8-flash", {"tokens": 10000})
+    assert (ai_policy.timeout_s, ai_policy.max_output_tokens, ai_policy.thinking_level) == (25, 4096, "low")
+
+
+def test_the_policy_command_sets_the_readers_switches_and_limits(ai_policy, capsys):
+    """Owner, 2026-11-20: the readers' settings are the row's, changed by the command for both
+    services at once; what is not named keeps its value."""
+    from django.core.management import call_command
+
+    call_command("ai_policy", "--receipt-reader", "off", "--invoice-reader", "on", "--timeout-s", "40",
+                 "--max-output-tokens", "6000", "--thinking-level", "medium", "--max-file-mb", "8",
+                 "--location", "global", "--by", "ops")
+
+    ai_policy.refresh_from_db()
+    assert (ai_policy.receipt_reader_on, ai_policy.invoice_reader_on) == (False, True)
+    assert (ai_policy.timeout_s, ai_policy.max_output_tokens) == (40, 6000)
+    assert (ai_policy.thinking_level, ai_policy.max_file_mb, ai_policy.updated_by) == ("medium", 8, "ops")
+    assert ai_policy.location == "global"
+    assert ai_policy.primary_model == "gemini-3.8-flash" and ai_policy.default_grant == {"tokens": 10000}
+    out = capsys.readouterr().out
+    assert "readers       : receipt off, invoice on" in out
+    assert "limits        : timeout 40 s, 6000 output tokens, thinking medium, files up to 8 MB" in out
+    assert "region        : global (Vertex AI)" in out
 
 
 def test_the_policy_command_refuses_a_grant_of_nothing(ai_policy, shop):
