@@ -49,8 +49,8 @@ def _extract(client, shop, model, *, day=D3, **reply):
 
 
 def test_a_receipt_in_another_currency_comes_back_converted_and_says_how(client, shop, model, rates):
-    body = _extract(client, shop, model, currency="USD", amount_value=12.34,
-                    document_date=RECEIPT_DAY.isoformat()).json()
+    body = _extract(client, shop, model, currency="USD", amount=12.34,
+                    date=RECEIPT_DAY.isoformat()).json()
 
     assert rates["asked"] == [("USD", "HKD", RECEIPT_DAY)]
     s = body["suggestions"]
@@ -63,25 +63,25 @@ def test_a_receipt_in_another_currency_comes_back_converted_and_says_how(client,
 
 
 def test_the_company_s_own_currency_asks_for_no_rate(client, shop, model, rates):
-    s = _extract(client, shop, model, currency="HKD", amount_value=120).json()["suggestions"]
+    s = _extract(client, shop, model, currency="HKD", amount=120).json()["suggestions"]
     assert rates["asked"] == [] and s["amount"]["value"] == "120.00" and "exchange" not in s
 
 
 def test_no_rate_leaves_the_amount_empty_and_names_the_currency(client, shop, model, rates):
     rates["answer"]["rate"] = None
-    s = _extract(client, shop, model, currency="TWD", amount_value=300).json()["suggestions"]
+    s = _extract(client, shop, model, currency="TWD", amount=300).json()["suggestions"]
     assert s["amount"]["value"] == "" and s["amount"]["applied"] is False
     assert s["exchange_failed"] == {"currency": "TWD"} and "exchange" not in s
 
 
 def test_a_receipt_with_no_date_uses_the_report_s_day(client, shop, model, rates):
-    _extract(client, shop, model, currency="USD", amount_value=12.34, document_date="")
+    _extract(client, shop, model, currency="USD", amount=12.34, date="")
     assert rates["asked"] == [("USD", "HKD", D3)]
 
 
 def test_without_the_report_s_day_the_company_s_today_is_used(client, shop, model, rates):
     # an older web sends no transaction_date
-    _extract(client, shop, model, day=None, currency="USD", amount_value=12.34, document_date="")
+    _extract(client, shop, model, day=None, currency="USD", amount=12.34, date="")
     assert len(rates["asked"]) == 1 and rates["asked"][0][2] >= D3
 
 
@@ -96,7 +96,7 @@ def test_a_day_that_is_not_a_date_is_refused(client, shop, model, rates):
 def test_the_cap_is_on_the_converted_amount(client, shop, model, rates):
     # 20,000,000 KRW is over the 10,000,000 cap as read, but about HKD 112,000 converted
     rates["answer"]["rate"] = fx.Rate(rate=Decimal("0.0056"), date=RECEIPT_DAY)
-    s = _extract(client, shop, model, currency="KRW", amount_value=20_000_000).json()["suggestions"]
+    s = _extract(client, shop, model, currency="KRW", amount=20_000_000).json()["suggestions"]
     assert s["amount"]["value"] == "112000.00"
 
 

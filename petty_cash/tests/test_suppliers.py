@@ -147,7 +147,7 @@ def test_a_contact_without_an_id_is_said(client, connected, http):
 
 def test_a_company_without_xero_adds_its_own_supplier(client, shop, http):
     """Contacts are never blocked behind Xero (owner, 2026-11-12): the company's own row, no Xero id;
-    the next live sync puts it in Xero."""
+    publish puts it in Xero (owner's decisions doc C1)."""
     resp = _post(client, shop, {"name": "Corner Bakery"})
 
     assert resp.status_code == 201, resp.json()
@@ -168,13 +168,37 @@ def test_a_disconnected_company_keeping_its_organisation_adds_its_own_too(client
 
 
 def test_a_name_the_company_has_is_that_supplier_never_a_second(client, connected, http):
-    own = XeroContactSync.objects.create(entity_id=connected.entity.id, name="Corner  Bakery", source="user")
+    linked = XeroContactSync.objects.create(entity_id=connected.entity.id, name="Corner  Bakery",
+                                            xero_contact_id="con-cb", xero_org_id=ORG)
 
     resp = _post(client, connected, {"name": "corner bakery"})
 
-    assert resp.status_code == 201 and resp.json()["id"] == str(own.id)
+    assert resp.status_code == 201 and resp.json()["id"] == "con-cb"
     assert XeroContactSync.objects.filter(entity_id=connected.entity.id).count() == 1
-    assert http.sent == []
+    assert linked.xero_contact_id == "con-cb" and http.sent == []
+
+
+def test_live_a_supplier_kept_only_in_minty_is_put_in_xero_too_never_a_second(client, connected, http):
+    """C5 (2026-11-20, as onboarding-api's chart): added again while connected, the company's own
+    supplier is linked to Xero's contact of its name, else made there - the same row, now in Xero."""
+    own = XeroContactSync.objects.create(entity_id=connected.entity.id, name="Corner Bakery", source="user")
+
+    resp = _post(client, connected, {"name": "corner  bakery"})
+
+    assert resp.status_code == 201 and resp.json()["id"] == "con-new"
+    own.refresh_from_db()
+    assert (own.xero_contact_id, own.xero_org_id) == ("con-new", ORG)
+    assert XeroContactSync.objects.filter(entity_id=connected.entity.id).count() == 1
+    assert [s["params"]["searchTerm"] for s in http.searched] == ["Corner Bakery"]
+
+
+def test_offline_a_supplier_kept_only_in_minty_stays_so(client, shop, http):
+    own = XeroContactSync.objects.create(entity_id=shop.entity.id, name="Corner Bakery", source="user")
+
+    resp = _post(client, shop, {"name": "corner bakery"})
+
+    assert resp.status_code == 201 and resp.json()["id"] == str(own.id)
+    assert http.sent == [] and http.searched == []
 
 
 def test_a_live_company_links_to_xeros_contact_of_that_name_before_making_one(client, connected, http):

@@ -18,7 +18,7 @@ from django.db import connection, connections
 from django.utils import timezone
 from minty_db.enums import EntityRole
 from minty_db.models import AccountInfo, AiGrant, AiPolicy, AiRead, UserEntity, XeroContactSync
-from minty_shared import ai
+from minty_shared import ai, ai_prompt
 from minty_shared.django import ai_allowance
 
 from petty_cash.services import receipt_reader
@@ -30,14 +30,12 @@ pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("lists")]
 
 
 def _reply(**over) -> str:
-    """A well-formed reply naming the shop's lists (``lists``: con-0001 ABC Supplies, acc-0001
-    400 Advertising switched on, acc-0002 410 Cleaning switched off), confident everywhere."""
+    """A well-formed reply to the owner's simple prompt (2026-11-20), naming the shop's lists by
+    the short ids sent (``lists``: con_01 = con-0001 ABC Supplies, con_02 = con-0002 Taxi Co,
+    acc_01 = acc-0001 400 Advertising; acc-0002 410 Cleaning is switched off and never sent)."""
     body = {
-        "supplier_contact_id": "con-0001", "supplier_name": "ABC Supplies", "supplier_confidence": 0.93,
-        "account_id": "acc-0001", "account_code": "400", "account_name": "Advertising",
-        "account_confidence": 0.88, "amount_value": 120.0, "amount_confidence": 0.97,
-        "description_value": "Flyers", "description_confidence": 0.81, "currency": "HKD",
-        "document_date": "2026-08-28", "document_date_confidence": 0.9,
+        "supplier_contact_id": "con_01", "supplier_name": "ABC Supplies", "account_id": "acc_01",
+        "amount": 120.0, "currency": "HKD", "date": "2026-08-28", "description": "Flyers",
     }
     body.update(over)
     return json.dumps(body)
@@ -121,7 +119,8 @@ def test_a_receipt_is_read_against_the_company_s_own_lists(client, shop, model):
     assert body["reader"] == {"enabled": True, "reads_used": None, "reads_limit": None, "reads_left": None,
                               "percent_left": 43, "blocked": False, "resumes_at": None}
     s = body["suggestions"]
-    assert s["supplier"] == {"value": "ABC Supplies", "confidence": 0.93, "band": "high",
+    # no confidence is asked (owner, 2026-11-20): every value is filled and marked to check
+    assert s["supplier"] == {"value": "ABC Supplies", "confidence": 0.0, "band": "medium",
                              "applied": True, "contact_id": "con-0001"}
     assert s["account"]["account_id"] == "acc-0001" and s["account"]["value"] == "400 Advertising"
     assert s["amount"]["value"] == "120.00" and s["description"]["value"] == "Flyers"
@@ -138,12 +137,14 @@ def test_the_prefix_carries_only_what_a_line_can_use_in_a_stable_order(client, s
     prefix = model.requests[0]["input"][0]["text"]
     assert prefix.startswith("## Entity\n")
     assert "Base currency: HKD" in prefix
-    assert "acc-0001 | 400 | Advertising" in prefix
-    assert "acc-0002" not in prefix  # switched off for Petty Cash: never suggested
+    assert "acc_01 | 400 | Advertising" in prefix
+    assert "Cleaning" not in prefix  # switched off for Petty Cash: never suggested
     # suppliers A to Z, so the cached prefix is byte-stable between reads
-    assert prefix.index("con-0001 | ABC Supplies") < prefix.index("con-0002 | Taxi Co")
-    assert model.requests[0]["system_instruction"] == receipt_reader.INSTRUCTION
-    assert "acc-0001" not in json.dumps(model.requests[0]["response_format"]["schema"])
+    assert prefix.index("con_01 | ABC Supplies") < prefix.index("con_02 | Taxi Co")
+    # short ids only: the company's own ids never reach the model
+    assert "acc-0001" not in prefix and "con-0001" not in prefix
+    assert model.requests[0]["system_instruction"] == ai_prompt.instruction("receipt")
+    assert "acc_01" not in json.dumps(model.requests[0]["response_format"]["schema"])
 
 
 @pytest.mark.parametrize("env, reason", [
@@ -247,8 +248,10 @@ def test_a_supplier_id_not_sent_is_dropped_and_the_rest_survives(client, shop, m
     assert s["amount"]["applied"] is True
 
 
-def test_an_account_id_not_sent_is_dropped(client, shop, model):
-    s, _ = _read(client, shop, model, account_id="acc-0002")  # exists, but switched off
+@pytest.mark.parametrize("account_id", ["acc_02", "acc-0001", "acc-0002"],
+                         ids=["not-sent", "a-real-id-not-a-short-one", "switched-off"])
+def test_an_account_id_not_sent_is_dropped(client, shop, model, account_id):
+    s, _ = _read(client, shop, model, account_id=account_id)
     assert s["account"]["account_id"] == "" and s["account"]["applied"] is False
 
 
@@ -269,33 +272,42 @@ def test_an_unmatched_supplier_name_is_offered_capped(client, shop, model):
 
 @pytest.mark.parametrize("amount", [0, -50, 99_999_999_999])
 def test_an_out_of_range_amount_is_dropped(client, shop, model, amount):
-    s, _ = _read(client, shop, model, amount_value=amount)
+    s, _ = _read(client, shop, model, amount=amount)
     assert s["amount"]["value"] == "" and s["amount"]["applied"] is False
 
 
 def test_the_description_is_capped_and_an_unknown_currency_dropped(client, shop, model):
-    s, _ = _read(client, shop, model, description_value="x" * 5000, currency="dollars")
+    s, _ = _read(client, shop, model, description="x" * 5000, currency="dollars")
     assert len(s["description"]["value"]) == 200 and s["currency"] == ""
 
 
-def test_low_is_kept_for_the_log_but_not_prefilled_and_medium_is(client, shop, model):
-    s, _ = _read(client, shop, model, amount_confidence=0.2, description_confidence=0.7)
-    assert (s["amount"]["band"], s["amount"]["applied"], s["amount"]["value"]) == ("low", False, "120.00")
-    assert (s["description"]["band"], s["description"]["applied"]) == ("medium", True)
+def test_every_answered_field_is_filled_and_marked_to_check(client, shop, model):
+    s, _ = _read(client, shop, model)
+    for key in ("supplier", "account", "amount", "description", "document_date"):
+        assert (s[key]["band"], s[key]["applied"]) == ("medium", True), key
+
+
+@pytest.mark.parametrize("value", ["28/08/2026", "2026-02-30", "soon"])
+def test_a_date_that_is_not_iso_is_dropped(client, shop, model, value):
+    s, _ = _read(client, shop, model, date=value)
+    assert s["document_date"]["value"] == "" and s["document_date"]["applied"] is False
+
+
+#: A reply that found nothing.
+EMPTY = {"supplier_contact_id": "", "supplier_name": "", "account_id": "", "amount": 0,
+         "currency": "", "date": "", "description": ""}
 
 
 def test_nothing_usable_says_so(client, shop, model):
-    low = {k: 0.1 for k in ("supplier_confidence", "account_confidence", "amount_confidence",
-                            "description_confidence", "document_date_confidence")}
-    _, reason = _read(client, shop, model, **low)
+    _, reason = _read(client, shop, model, **EMPTY)
     assert reason == "no_usable_field"
 
 
-def test_the_instruction_asks_for_english_and_keeps_the_supplier_name():
-    instruction = receipt_reader.INSTRUCTION
-    assert "supplier_name IS AN EXCEPTION" in instruction
-    assert "ALWAYS write description_value in English" in instruction
-    assert "Write supplier_name in English only" in instruction
+def test_the_instruction_is_the_owners_simple_prompt(shop):
+    instruction, prefix, aliases = receipt_reader.prompt(receipt_reader.build_context(shop.entity.id))
+    assert instruction == ai_prompt.instruction("receipt")
+    assert prefix.startswith("## Entity\n")
+    assert (aliases.account("acc_01"), aliases.supplier("con_02")) == ("acc-0001", "con-0002")
 
 
 # --- the connectivity check (Flask's `flask expense-ai check`, moved here) ----------------------
@@ -304,8 +316,7 @@ def test_the_instruction_asks_for_english_and_keeps_the_supplier_name():
 def test_the_check_command_sends_a_generated_image_and_reports_the_round_trip(model, capsys):
     from django.core.management import call_command
 
-    model.answer = FakeInteraction(_reply(supplier_contact_id="", account_id="", amount_value=0,
-                                          description_value="", document_date=""))
+    model.answer = FakeInteraction(_reply(**EMPTY))
     call_command("expense_ai_check")
 
     out = capsys.readouterr().out
@@ -393,9 +404,7 @@ def test_a_failed_read_uses_none_of_the_grant_but_its_tokens_are_recorded(client
 
 
 def test_nothing_usable_is_still_a_read(client, shop, model):
-    low = {k: 0.1 for k in ("supplier_confidence", "account_confidence", "amount_confidence",
-                            "description_confidence", "document_date_confidence")}
-    model.answer = FakeInteraction(_reply(**low))
+    model.answer = FakeInteraction(_reply(**EMPTY))
 
     body = _extract(client, shop).json()
 
@@ -582,42 +591,3 @@ def test_the_policy_command_refuses_a_grant_of_nothing(ai_policy, shop):
     with pytest.raises(CommandError, match="gives nothing"):
         call_command("ai_policy", "--grant", str(shop.entity.id), "--days", "30")
     assert not AiGrant.objects.exists()
-
-
-# --- the owner's prompt update (2026-11-19): currency from '$', the raw date, card slips -----------
-
-LAST_LINE = "- Answer only with the JSON object described by the response schema."
-
-
-def test_the_instruction_adds_the_currency_raw_date_and_card_slip_rules_before_its_last_line():
-    instruction = receipt_reader.INSTRUCTION
-    for rule in (
-        "- currency is the ISO 4217 code of the amounts on the document. If only '$' is printed, "
-        "infer it from the issuer's country.\n",
-        "- date_raw is the date exactly as printed on the document, character for character. "
-        "Do not reformat it.\n",
-        "- card_slip_only is true if the document is only a card terminal slip that does not show "
-        "what was bought. If so, leave description_value and account_id empty.\n",
-    ):
-        assert rule in instruction
-        assert instruction.index(rule) < instruction.index(LAST_LINE)
-    assert instruction.endswith(LAST_LINE)
-    fields = receipt_reader.ExpenseSuggestion.model_fields
-    assert fields["date_raw"].default == "" and fields["card_slip_only"].default is False
-
-
-def test_the_raw_date_is_handed_on_as_printed_and_capped(client, shop, model):
-    s, _ = _read(client, shop, model, date_raw="  28/08/26  ")
-    assert s["date_raw"] == "28/08/26"
-    s, _ = _read(client, shop, model, date_raw="x" * 500)
-    assert len(s["date_raw"]) == 40
-
-
-def test_a_card_slip_fills_nothing_and_says_so_but_is_a_read(client, shop, model):
-    model.answer = FakeInteraction(_reply(card_slip_only=True, description_value="", account_id=""))
-
-    body = _extract(client, shop).json()
-
-    assert body["suggestions"] is None and body["reason"] == "card_slip_only"
-    [row] = AiRead.objects.filter(entity_id=shop.entity.id)
-    assert row.status == "ok"  # a model answered: it counts against the allowance

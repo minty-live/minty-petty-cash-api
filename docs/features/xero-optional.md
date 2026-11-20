@@ -18,8 +18,10 @@ again.
 
 **The publish writes what it sent** (`publish._snapshot`, on every completed publish, for every
 company): each expense line's `published_account_code` / `published_account_name` and
-`published_contact_name`. A published report shows those; no sync or later code change rewrites them -
-only the next publish.
+`published_contact_name`. No sync or later code change rewrites them - only the next publish. The
+screens and the CSV show each line's account and supplier as linked now (the owner's decisions doc A5,
+2026-11-19), so a re-map shows everywhere at once; the snapshot is only the fallback for a line whose
+account or supplier is gone (`petty_cash_report_csv.py`).
 
 Tests: `petty_cash/tests/test_minty_on_its_own.py` (both passes).
 

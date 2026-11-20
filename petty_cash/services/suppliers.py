@@ -4,12 +4,13 @@ token comes from Flask (``core/xero_tokens.py``); Flask retried once after its o
 401/403, which is the token service's job here, so a refusal from Xero is final.
 
 Never blocked behind Xero, never a duplicate (owner, 2026-11-12): a name the company already has
-(case and inner spaces ignored) is that supplier; with no live connection the supplier is the
-company's own row (no Xero id - the next live sync puts it in Xero); live, Xero's contact of that
-name is linked from the stored copies before one is made. A supplier the company deleted is that
-one brought back (onboarding-api's chart rule): its archived row active again, or Xero's archived
-contact of the name linked again - ACTIVE in Xero when it is there; offline, one still linked to
-Xero waits for a reconnect.
+(case and inner spaces ignored) is that supplier - live on Xero, one kept only in Minty is put in
+Xero too (owner's decisions doc C5, 2026-11-19); with no live connection the supplier is the
+company's own row (no Xero id - publish puts it in Xero, C1); live, Xero's contact of that name is
+linked from the stored copies, else searched in Xero, before one is made there. A supplier the
+company deleted is that one brought back (onboarding-api's chart rule): its archived row active
+again, or Xero's archived contact of the name linked as it stands - Minty never restores anything
+in Xero (C4); offline, one still linked to Xero waits for a reconnect.
 """
 
 from __future__ import annotations
@@ -99,18 +100,47 @@ def _brought_back(entity: Entity, name: str, offline: bool) -> XeroContactSync |
     return row
 
 
+def _found_or_made(entity: Entity, name: str) -> str:
+    """The ContactID of Xero's contact of ``name`` (searched live, case and extra spaces ignored),
+    else of one made there as a supplier (C5). Raises ``SupplierRefused``."""
+    token = _access_token(entity.id)
+    try:
+        made = found_or_made(token, entity.xero_org_id, " ".join(name.split()))
+    except XeroContactUnavailable as unavailable:
+        if unavailable.status in (401, 403):
+            raise SupplierRefused(NO_ENTRY) from None
+        raise SupplierRefused(NO_ID if unavailable.no_id else NOT_ADDED) from None
+    return made["ContactID"]
+
+
+def _put_in_xero(entity: Entity, row: XeroContactSync) -> XeroContactSync:
+    """The company's own supplier, kept only in Minty, added again while live (C5): linked to Xero's
+    contact of its name, else made there. If another of the company's rows already holds that Xero
+    contact, that row is the supplier (never a second link to one contact)."""
+    xero_contact_id = _found_or_made(entity, row.name)
+    holder = XeroContactSync.objects.filter(entity_id=entity.id, xero_contact_id=xero_contact_id).first()
+    if holder is not None:
+        return holder
+    XeroContactSync.objects.filter(id=row.id).update(xero_contact_id=xero_contact_id, xero_org_id=entity.xero_org_id)
+    row.xero_contact_id, row.xero_org_id = xero_contact_id, entity.xero_org_id
+    logger.info("Supplier %s kept in Minty is now in Xero for company %s", row.id, entity.id)
+    return row
+
+
 def create_supplier(entity_id, name: str) -> XeroContactSync:
     """The company's supplier of ``name``: the one it has, else - live on Xero - Xero's of that
     name or a new one made there, else its own Minty row."""
     entity = Entity.objects.filter(id=entity_id).first()
     if entity is None:
         raise SupplierRefused(NOT_CONNECTED)
-    held = _held(entity_id, name)
-    if held is not None:
-        return held
     # offline: no organisation; disconnected (a disconnect keeps the organisation, 2026-11-10); or
     # still keeping its books in Minty - mid-matching too, whose Finish links its suppliers
     offline = not entity.xero_org_id or entity.status == "disconnected" or minty_on_its_own(entity_id)
+    held = _held(entity_id, name)
+    if held is not None:
+        if held.xero_contact_id or offline:
+            return held
+        return _put_in_xero(entity, held)
     back = _brought_back(entity, name, offline)
     if back is not None:
         return back
@@ -130,14 +160,7 @@ def create_supplier(entity_id, name: str) -> XeroContactSync:
     # Added while connected, it is made in both (owner's decisions doc C5, 2026-11-19): Xero's contact
     # of the name (searched live, case and extra spaces ignored) is linked, else it is made there as a
     # supplier - never a twin in Xero.
-    token = _access_token(entity_id)
-    try:
-        made = found_or_made(token, entity.xero_org_id, " ".join(name.split()))
-    except XeroContactUnavailable as unavailable:
-        if unavailable.status in (401, 403):
-            raise SupplierRefused(NO_ENTRY) from None
-        raise SupplierRefused(NO_ID if unavailable.no_id else NOT_ADDED) from None
-    xero_contact_id = made["ContactID"]
+    xero_contact_id = _found_or_made(entity, name)
     created_name = " ".join(name.split())[:MAX_NAME]
 
     with transaction.atomic():

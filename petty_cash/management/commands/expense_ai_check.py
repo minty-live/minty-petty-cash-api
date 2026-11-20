@@ -11,7 +11,7 @@ from __future__ import annotations
 import io
 
 from django.core.management.base import BaseCommand, CommandError
-from minty_shared import ai
+from minty_shared import ai, ai_prompt
 from minty_shared.django import ai_allowance
 from PIL import Image
 
@@ -49,10 +49,10 @@ class Command(BaseCommand):
 
         buffer = io.BytesIO()
         Image.new("RGB", (2, 2), (255, 255, 255)).save(buffer, format="PNG")
-        result = ai.read(buffer.getvalue(), "image/png", config=config, instruction=rr.INSTRUCTION,
-                         prefix_text=rr.prefix_text(_CONTEXT), closing_text=rr.CLOSING,
-                         reply_model=rr.ExpenseSuggestion,
-                         validate=lambda parsed: rr.validate(parsed, _CONTEXT), models=models)
+        instruction, prefix, aliases = rr.prompt(_CONTEXT)
+        result = ai.read(buffer.getvalue(), "image/png", config=config, instruction=instruction,
+                         prefix_text=prefix, closing_text=ai_prompt.CLOSING, reply_model=rr.Reading,
+                         validate=lambda parsed: rr.validate(parsed, _CONTEXT, aliases), models=models)
 
         audit = result.audit
         self.stdout.write(f"answered by      : {audit.get('model_answered') or '-'}")
