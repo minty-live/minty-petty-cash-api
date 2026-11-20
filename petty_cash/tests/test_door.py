@@ -83,6 +83,18 @@ def test_a_token_whose_sign_in_has_ended_is_unauthorized(client, shop, hub_sessi
     assert resp["Access-Control-Allow-Origin"] == WEB
 
 
+def test_accounts_api_unreachable_refuses_a_sign_in_not_confirmed_lately_with_a_503(client, shop, hub_sessions):
+    # minty-shared v0.9 (owner, 2026-11-19): a short grace, then refuse - never a sign-out.
+    hub_sessions.unreachable()
+    resp = _get(client, shop.entity.id, headers(shop.owner.id, sid="s1"))
+
+    assert resp.status_code == 503
+    assert resp.json() == {"error": "Minty can't check your sign-in just now. Try again in a minute."}
+    assert resp["Access-Control-Allow-Origin"] == WEB
+    hub_sessions.reachable()
+    assert _get(client, shop.entity.id, headers(shop.owner.id, sid="s1")).status_code == 200
+
+
 def test_an_expired_token_whose_sign_in_has_ended_says_so(client, shop, hub_sessions):
     # The usual case after 60 idle minutes: the token ran out AND the sign-in ended.
     hub_sessions.end("gone")
