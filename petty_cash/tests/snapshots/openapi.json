@@ -991,6 +991,27 @@
         ]
       }
     },
+    "/api/petty-cash/v1/companies/{entity_id}/settings/sales": {
+      "put": {
+        "description": "The hub's \"Sales accounts and methods\" card, held until Save changes (2026-11-20):\n``{accounts: {cash, electronic, delivery}, methods: {electronic: [..], delivery: [..]}}``, each\nlist in its new order of ``{id, name?}`` (kept; a different name renames), ``{sale_info_id}`` or\n``{name}`` (added); a method left out of its list is removed, a type left out stays as it is.\nThe per-change rules and sentences hold, in one transaction: any refusal writes nothing.",
+        "operationId": "petty_cash_routes_settings_save_sales_settings",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "PettyCashBearerAuth": []
+          }
+        ],
+        "summary": "Save Sales Settings",
+        "tags": [
+          "Settings"
+        ]
+      }
+    },
     "/api/petty-cash/v1/companies/{entity_id}/settings/sales-accounts": {
       "put": {
         "description": "``{cash, electronic, delivery}`` - Sales - Cash, Electronic Payment and Delivery on or off\n(owner, 2026-11-17; Figma 464:73 row 4). At least one stays on. Turning one off keeps its methods:\nthe daily report stops asking for that part, and they come back when it is turned on again.",

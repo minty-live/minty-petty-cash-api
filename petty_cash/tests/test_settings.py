@@ -339,3 +339,133 @@ def test_a_cashier_cannot_change_the_sales_accounts(client, shop, methods):
     assert _accounts(client, shop, True, True, False, user=cashier).status_code == 403
     shop.entity.refresh_from_db()
     assert shop.entity.sells_delivery is None
+
+
+# --- the whole card in one save (2026-11-20) ----------------------------------------------------------
+# The hub's "Sales accounts and methods" card holds every tick and method change until Save changes,
+# then sends one PUT /settings/sales. It is one transaction: any refusal writes nothing.
+
+ALL_ON = {"cash": True, "electronic": True, "delivery": True}
+
+
+@pytest.fixture
+def cash(shop):
+    """Every company is linked to Minty's Cash method when it is made (onboarding's entity_create)."""
+    row = SaleInfo.objects.create(sale_name="Cash", value_name="cash_sales", type=SaleType.OTHER, display_order=0)
+    EntitySaleSetting.objects.create(entity_id=shop.entity.id, sale_id=row.id, is_active=True, display_order=0)
+    return row
+
+
+def _save(client, shop, methods_body, accounts=None, user=None):
+    return call(client, shop, "put", "/settings/sales",
+                {"accounts": accounts or ALL_ON, "methods": methods_body}, user=user)
+
+
+def _kept(ids, *names_):
+    return [{"id": ids[n]} for n in names_]
+
+
+def _snapshot(shop):
+    """What a refused save must leave as it was: the lists (id, name, order), the ticks, the rows."""
+    shop.entity.refresh_from_db()
+    links = sorted(EntitySaleSetting.objects.filter(entity_id=shop.entity.id)
+                   .values_list("sale_id", "is_active", "display_order"), key=str)
+    rows = sorted(SaleInfo.objects.values_list("id", "sale_name", "enabled"), key=str)
+    return links, rows, (shop.entity.uses_sales_cash, shop.entity.sells_electronic, shop.entity.sells_delivery)
+
+
+def test_one_save_applies_ticks_adds_renames_removals_and_order(client, shop, methods, cash):
+    octopus = SaleInfo.objects.create(sale_name="Octopus", type=SaleType.ELECTRONIC, value_name="octopus_sales")
+
+    resp = _save(client, shop, {
+        # Visa (Minty's) left out = off the list; Alipay renamed and moved first; Octopus picked; Keeta typed
+        "electronic": [{"id": methods["Alipay"], "name": "AlipayHK"}, {"sale_info_id": str(octopus.id)}],
+        "delivery": [{"name": " Keeta "}, {"id": methods["Foodpanda"], "name": "Foodpanda"}],
+    }, accounts={"cash": False, "electronic": True, "delivery": True})
+
+    assert resp.status_code == 200, resp.json()
+    body = resp.json()
+    assert body["message"] == "Your sales accounts and methods are saved."
+    assert names(body, "electronic") == ["AlipayHK", "Octopus"]
+    assert names(body, "delivery") == ["Keeta", "Foodpanda"]
+    assert body["sales_parts"] == {"cash": False, "electronic": True, "delivery": True}
+    assert methods["Visa"] in [m["id"] for m in body["available"]["electronic"]]
+    assert EntitySaleSetting.objects.get(entity_id=shop.entity.id, sale_id=methods["Visa"]).is_active is False
+    keeta = SaleInfo.objects.get(sale_name="Keeta")
+    assert (keeta.type, keeta.value_name, keeta.entity_id) == ("delivery", "keeta_sales", shop.entity.id)
+
+
+def test_one_save_deletes_an_unused_own_method_and_switches_off_a_used_one(client, shop, methods, cash):
+    kpay = seed_methods(shop.entity, electronic=("Kpay",), delivery=(), own=("Kpay",))["Kpay"]
+    report = Report.objects.create(entity_id=shop.entity.id, transaction_date="2026-11-01")
+    ReportSale.objects.create(report_id=report.id, sale_id=kpay, amount=12)
+
+    resp = _save(client, shop, {"electronic": _kept(methods, "Visa"), "delivery": _kept(methods, "Foodpanda")})
+
+    assert resp.status_code == 200, resp.json()
+    assert names(resp.json(), "electronic") == ["Visa"]
+    assert not SaleInfo.objects.filter(id=methods["Alipay"]).exists()
+    assert SaleInfo.objects.get(id=kpay).enabled is False, "a report used it: switched off, not deleted"
+    assert str(ReportSale.objects.get(report_id=report.id).sale_id) == kpay
+
+
+def test_a_type_left_out_of_the_save_stays_as_it_is(client, shop, methods, cash):
+    resp = _save(client, shop, {"electronic": _kept(methods, "Visa", "Alipay")})
+
+    assert resp.status_code == 200, resp.json()
+    assert names(resp.json(), "delivery") == ["Foodpanda"]
+
+
+def test_saving_nothing_changed_is_fine(client, shop, methods, cash):
+    before = _snapshot(shop)
+    resp = _save(client, shop, {"electronic": _kept(methods, "Visa", "Alipay"), "delivery": _kept(methods, "Foodpanda")},
+                 accounts={"cash": True, "electronic": True, "delivery": True})
+    assert resp.status_code == 200, resp.json()
+    links, rows, _ticks = _snapshot(shop)
+    assert (links, rows) == before[:2]
+
+
+@pytest.mark.parametrize("methods_body, accounts, status, message", [
+    # a rename of Minty's method, after the removal of Visa that the save would have written first
+    (lambda ids: {"electronic": [{"id": ids["Alipay"]}],
+                  "delivery": [{"id": ids["Foodpanda"], "name": "Panda"}]}, None, 403,
+     "Foodpanda comes with Minty, so it can't be renamed. Take it off your list and add your own method instead."),
+    (lambda ids: {"electronic": [{"id": ids["Visa"]}, {"id": ids["Alipay"], "name": "foodpanda"}]}, None, 409,
+     "A method with that name already exists."),
+    (lambda ids: {"electronic": [{"id": "6d0b6d55-0000-4000-8000-000000000000"}]}, None, 404,
+     "That sales method isn't on this company's list."),
+    (lambda ids: {"electronic": [{"id": ids["Foodpanda"]}]}, None, 404,
+     "That sales method isn't on this company's list."),
+    (lambda ids: {"electronic": [{"id": ids["Visa"]}, {"name": "visa"}]}, None, 409, "visa is already on the list."),
+    (lambda ids: {"electronic": [{"id": ids["Alipay"]}, {"name": "Kpay"}, {"name": "KPAY"}]}, None, 409,
+     "KPAY is already on the list."),
+    (lambda ids: {"electronic": [{"name": "  "}]}, None, 422, "The method's name is still empty. Type a name to add it."),
+    (lambda ids: {"electronic": [{"name": "y" * 75}]}, None, 422,
+     "That name is too long. Keep it to 74 characters or fewer."),
+    (lambda ids: {"electronic": [{"id": ids["Alipay"], "name": " "}]}, None, 422,
+     "The method's name is still empty. Type a name to save it."),
+    (lambda ids: {"electronic": [{"sale_info_id": "nope"}]}, None, 422,
+     "Pick one of the methods offered, or type a new name."),
+    (lambda ids: {"electronic": []}, {"cash": False, "electronic": False, "delivery": False}, 422,
+     "No sales account is ticked yet. Tick at least one to continue."),
+    (lambda ids: {"electronic": []}, {"cash": True, "electronic": "yes", "delivery": False}, 422,
+     "Turn each sales account on or off to continue."),
+    (lambda ids: {"other": []}, None, 422, "Send each type's methods in their order to save them."),
+    (lambda ids: {"electronic": "Visa"}, None, 422, "Send each type's methods in their order to save them."),
+    (lambda ids: {"electronic": [{"id": ids["Visa"]}, {"id": ids["Visa"]}]}, None, 422,
+     "Send each type's methods in their order to save them."),
+])
+def test_a_refused_save_writes_nothing(client, shop, methods, cash, methods_body, accounts, status, message):
+    before = _snapshot(shop)
+
+    resp = _save(client, shop, methods_body(methods), accounts=accounts)
+
+    assert resp.status_code == status and resp.json() == {"error": message}
+    assert _snapshot(shop) == before
+
+
+def test_a_cashier_cannot_save_the_card(client, shop, methods, cash):
+    before = _snapshot(shop)
+    resp = _save(client, shop, {"electronic": []}, user=member(shop, EntityRole.CASHIER))
+    assert resp.status_code == 403
+    assert _snapshot(shop) == before

@@ -20,9 +20,14 @@ from django.db.models.functions import Lower
 from minty_db.enums import SaleType
 from minty_db.models import EntitySaleSetting, ReportSale, SaleInfo
 
+from petty_cash.services.sales import set_sales_parts
+
 logger = logging.getLogger("petty-cash-api")
 
 TYPES = ("electronic", "delivery")
+
+NOT_FOUND = "That sales method isn't on this company's list."
+PICK_OFFERED = "Pick one of the methods offered, or type a new name."
 
 
 class SettingsRefused(Exception):
@@ -94,10 +99,11 @@ def value_name_for(name: str) -> str:
 
 
 @transaction.atomic
-def add_method(entity_id, kind: str, *, sale_info_id=None, name: str) -> None:
+def add_method(entity_id, kind: str, *, sale_info_id=None, name: str) -> str:
     """Link a method to the company, or switch its link back on. The row is the one picked
     (``sale_info_id``, Minty's or the company's own - the route checks), else Minty's or the
-    company's own with that name, else a new row of the company's own (never a new Minty one)."""
+    company's own with that name, else a new row of the company's own (never a new Minty one).
+    Returns the linked row's id."""
     sale = SaleInfo.objects.filter(offered(entity_id), id=sale_info_id).first() if sale_info_id else None
     if sale is None:
         sale = by_name(name, entity_id)
@@ -109,10 +115,11 @@ def add_method(entity_id, kind: str, *, sale_info_id=None, name: str) -> None:
     link = EntitySaleSetting.objects.select_for_update().filter(entity_id=entity_id, sale_id=sale.id).first()
     if link is not None:
         EntitySaleSetting.objects.filter(entity_id=entity_id, sale_id=sale.id).update(is_active=True)
-        return
+        return str(sale.id)
     last = EntitySaleSetting.objects.filter(entity_id=entity_id).aggregate(m=Max("display_order"))["m"]
     EntitySaleSetting.objects.create(entity_id=entity_id, sale_id=sale.id, is_active=True,
                                      display_order=int(last or 0) + 1)
+    return str(sale.id)
 
 
 @transaction.atomic
@@ -157,3 +164,70 @@ def remove_method(entity_id, method_id) -> str:
 def reorder_methods(entity_id, method_ids: list[str]) -> None:
     for index, method_id in enumerate(method_ids):
         EntitySaleSetting.objects.filter(entity_id=entity_id, sale_id=method_id).update(display_order=index + 1)
+
+
+def offered_sale(entity_id, kind: str, sale_info_id) -> SaleInfo:
+    """A method picked from Add New Method's list: Minty's or the company's own, enabled, of that
+    type - anything else is refused (422)."""
+    sale = SaleInfo.objects.filter(offered(entity_id), id=str(sale_info_id)).first()
+    if sale is None or not sale.enabled or str(sale.type) != kind:
+        raise SettingsRefused(PICK_OFFERED, 422)
+    return sale
+
+
+@transaction.atomic
+def save_sales(entity_id, parts: tuple[bool, bool, bool], wanted: dict, *, allow) -> None:
+    """The hub's "Sales accounts and methods" card, saved at once (2026-11-20): the three sales
+    accounts (``set_sales_parts``) and, per type sent, the methods in their new order - ``{"id"}``
+    keeps one (``"name"`` renames it), ``{"sale_info_id"}`` or ``{"name"}`` adds one, and a method
+    left out is removed (``remove_method``: a used own method is switched off, not deleted). A type
+    not sent stays as it is. The route has checked the shapes and the name lengths; ``allow(right)``
+    raises when the person lacks that right. One transaction: any refusal writes nothing."""
+    current = methods(entity_id)
+    steps = []  # (kind, removals, renames, items with each add's sale resolved)
+    for kind, items in wanted.items():
+        listed = {m["id"]: m for m in current[kind]}
+        kept = [item["id"] for item in items if item.get("id")]
+        if any(method_id not in listed for method_id in kept):
+            raise SettingsRefused(NOT_FOUND, 404)
+        removals = [method_id for method_id in listed if method_id not in kept]
+        renames, seen, resolved = [], {}, []
+        for item in items:
+            if item.get("id"):
+                name = item.get("name")
+                if name is not None and name != listed[item["id"]]["name"]:
+                    renames.append((item["id"], name))
+                else:
+                    name = listed[item["id"]]["name"]
+                added = False
+            else:
+                sale = offered_sale(entity_id, kind, item["sale_info_id"]) if item.get("sale_info_id") else None
+                name = sale.sale_name if sale else item["name"]
+                item = {**item, "sale_info_id": str(sale.id) if sale else None, "name": name}
+                added = True
+            if name.casefold() in seen:
+                raise SettingsRefused(f"{name} is already on the list." if added
+                                      else "A method with that name already exists.", 409)
+            seen[name.casefold()] = item
+            resolved.append(item)
+        # where the per-change endpoints would put them: the kept in today's order, then the adds
+        expected = [method_id for method_id in listed if method_id in kept] + [None] * (len(items) - len(kept))
+        moved = [item.get("id") for item in items] != expected
+        for right, needed in (("SALES_METHOD_DELETE", removals), ("SALES_METHOD_UPDATE", renames),
+                              ("SALES_METHOD_CREATE", len(items) > len(kept)), ("SALES_METHOD_REORDER", moved)):
+            if needed:
+                allow(right)
+        steps.append((kind, removals, renames, resolved))
+
+    for _kind, removals, _renames, _items in steps:
+        for method_id in removals:
+            remove_method(entity_id, method_id)
+    for _kind, _removals, renames, _items in steps:
+        for method_id, name in renames:
+            rename_method(entity_id, method_id, name)
+    for kind, _removals, _renames, items in steps:
+        order = [item["id"] if item.get("id")
+                 else add_method(entity_id, kind, sale_info_id=item["sale_info_id"], name=item["name"])
+                 for item in items]
+        reorder_methods(entity_id, order)
+    set_sales_parts(entity_id, *parts)

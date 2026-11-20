@@ -6,6 +6,8 @@ sales methods here; the Xero cards forwarded to Flask. The country and currency 
   connected, and what this person may change.
 - ``POST /sales-methods`` ``{type, sale_info_id | name}``, ``PUT /sales-methods/{id}`` ``{name}``,
   ``DELETE /sales-methods/{id}``, ``PUT /sales-methods/order`` ``{type, method_ids}``.
+- ``PUT /settings/sales`` ``{accounts: {cash, electronic, delivery}, methods: {electronic: [..],
+  delivery: [..]}}``: the hub's "Sales accounts and methods" card in one save (2026-11-20).
 - ``GET /settings/xero``, ``PUT /settings/xero/mapping``, ``PUT /settings/xero/account-codes``: the
   Xero cards (``services/xero_cards.py``; done here since Phase 3 of the Flask retirement,
   2026-11-06 - forwarded to Flask until then). ``COA_VIEW`` to read, ``XERO_RIGHTS`` to save (403).
@@ -30,6 +32,8 @@ from petty_cash.routes._input import json_body
 from petty_cash.services import xero_cards
 from petty_cash.services.sales import sales_groups, sales_parts, set_sales_parts
 from petty_cash.services.settings import (
+    NOT_FOUND,
+    PICK_OFFERED,
     TYPES,
     SettingsRefused,
     add_method,
@@ -39,6 +43,7 @@ from petty_cash.services.settings import (
     remove_method,
     rename_method,
     reorder_methods,
+    save_sales,
 )
 
 router = Router()
@@ -52,7 +57,6 @@ RENAME_NAME_MAX = 80
 #: the Xero cards' saves, only with all four
 XERO_RIGHTS = ("ENTITY_UPDATE", "COA_UPDATE", "COA_CREATE", "COA_DELETE")
 NO_RIGHT = "You don't have permission to change these settings. Ask an Accountant or an Admin."
-NOT_FOUND = "That sales method isn't on this company's list."
 
 
 def _may(request, *names) -> bool:
@@ -161,14 +165,69 @@ def save_sales_accounts(request):
     the daily report stops asking for that part, and they come back when it is turned on again."""
     if not _may(request, "SALES_METHOD_UPDATE"):
         raise Refused(NO_RIGHT, 403)
-    data = _body(request)
-    ticks = [data.get(k) for k in ("cash", "electronic", "delivery")]
+    set_sales_parts(request.company.id, *_ticks(_body(request)))
+    return _answer(request, "Your sales accounts are saved.")
+
+
+def _ticks(data) -> tuple[bool, bool, bool]:
+    ticks = [data.get(k) for k in ("cash", "electronic", "delivery")] if isinstance(data, dict) else [None]
     if not all(isinstance(t, bool) for t in ticks):
         raise Refused("Turn each sales account on or off to continue.", 422)
     if not any(ticks):
         raise Refused(NO_SALES_ACCOUNT, 422)
-    set_sales_parts(request.company.id, *ticks)
-    return _answer(request, "Your sales accounts are saved.")
+    return tuple(ticks)
+
+
+NO_METHOD_LISTS = "Send each type's methods in their order to save them."
+
+
+def _wanted_item(item) -> dict:
+    """One method of a list, checked: ``{id, name?}`` kept (and renamed), ``{sale_info_id}`` or
+    ``{name}`` added."""
+    if not isinstance(item, dict):
+        raise Refused(NO_METHOD_LISTS, 422)
+    if item.get("id"):
+        if not _uuid(item["id"]):
+            raise Refused(NOT_FOUND, 404)
+        name = item.get("name")
+        return {"id": str(uuid.UUID(str(item["id"]))),
+                "name": None if name is None else _name(name, RENAME_NAME_MAX, "save")}
+    if item.get("sale_info_id"):
+        if not _uuid(item["sale_info_id"]):
+            raise Refused(PICK_OFFERED, 422)
+        return {"sale_info_id": str(item["sale_info_id"])}
+    return {"name": _name(item.get("name"), ADD_NAME_MAX, "add")}
+
+
+@router.put("/settings/sales")
+def save_sales_settings(request):
+    """The hub's "Sales accounts and methods" card, held until Save changes (2026-11-20):
+    ``{accounts: {cash, electronic, delivery}, methods: {electronic: [..], delivery: [..]}}``, each
+    list in its new order of ``{id, name?}`` (kept; a different name renames), ``{sale_info_id}`` or
+    ``{name}`` (added); a method left out of its list is removed, a type left out stays as it is.
+    The per-change rules and sentences hold, in one transaction: any refusal writes nothing."""
+    if not _may(request, "SALES_METHOD_UPDATE"):
+        raise Refused(NO_RIGHT, 403)
+    data = _body(request)
+    ticks = _ticks(data.get("accounts"))
+    lists = data.get("methods")
+    if not isinstance(lists, dict) or any(k not in TYPES or not isinstance(v, list) for k, v in lists.items()):
+        raise Refused(NO_METHOD_LISTS, 422)
+    wanted = {kind: [_wanted_item(item) for item in items] for kind, items in lists.items()}
+    for items in wanted.values():
+        ids = [item["id"] for item in items if item.get("id")]
+        if len(ids) != len(set(ids)):
+            raise Refused(NO_METHOD_LISTS, 422)
+
+    def allow(right: str) -> None:
+        if not _may(request, right):
+            raise Refused(NO_RIGHT, 403)
+
+    try:
+        save_sales(request.company.id, ticks, wanted, allow=allow)
+    except SettingsRefused as refused:
+        raise Refused(refused.message, refused.status) from None
+    return _answer(request, "Your sales accounts and methods are saved.")
 
 
 @router.post("/sales-methods")
@@ -187,7 +246,7 @@ def add_sales_method(request):
             if _uuid(data["sale_info_id"]) else None
         )
         if sale is None or not sale.enabled or str(sale.type) != kind:
-            raise Refused("Pick one of the methods offered, or type a new name.", 422)
+            raise Refused(PICK_OFFERED, 422)
         sale_info_id, name = str(sale.id), sale.sale_name
     else:
         name = _name(data.get("name"), ADD_NAME_MAX, "add")
