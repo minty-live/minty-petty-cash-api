@@ -5,7 +5,11 @@
 - ``POST /reports/expenses/lines`` (multipart): ``transaction_date, amount, description, supplier_id,
   account_id`` and one ``receipt`` - every field checked here: an amount above 0 and up to the
   maximum, a supplier and an account from the lists above, a description of at most 300
-  characters, one PDF / JPEG / PNG of at most 10 MB judged by its bytes.
+  characters, one PDF / JPEG / PNG of at most 10 MB judged by its bytes. Instead of ``supplier_id``
+  it takes the receipt reader's ``new_supplier_token`` (the user, 2026-11-23): the supplier the
+  reader read and the company does not have is added once every other check passes, as
+  ``POST /suppliers`` adds one but by anyone who may add a line; a token altered, for another company
+  or older than 7 days is 422. ``PATCH`` below takes it too.
 - ``DELETE /expense-lines/{id}``: a line of this company's draft.
 - ``PATCH /expense-lines/{id}`` (multipart): change that line - amount, description, supplier,
   account, its receipt replaced or some receipts removed - checked as adding is
@@ -42,7 +46,7 @@ from minty_db.models import (
     ReportExpenseAttachment,
     XeroContactSync,
 )
-from minty_shared import fx
+from minty_shared import ai, fx
 from ninja import Router
 
 from core.exceptions import Refused
@@ -97,6 +101,7 @@ NO_DRAFT = "I don't see a draft yet - let's start with the opening entry."
 NOT_FOUND = "Hmm, I couldn't find that expense."
 NO_FILE = "I couldn't find that file."
 MAX_DESCRIPTION = 300
+READER_SUPPLIER_GONE = "The suggested contact has expired. Choose a contact from the list or add it."
 
 
 def _receipt_name(attachment: Attachment) -> str:
@@ -215,9 +220,11 @@ def add_expense_line(request):
     description = (form.get("description") or "").strip()
     if len(description) > MAX_DESCRIPTION:
         raise Refused(f"Keep the description to {MAX_DESCRIPTION} characters or fewer.", 422)
-    supplier = find_supplier(entity_id, form.get("supplier_id"))
-    if supplier is None:
-        raise Refused("Choose a supplier from the list.", 422)
+    supplier, read_name = None, _reader_supplier_name(entity_id, form)
+    if read_name is None:
+        supplier = find_supplier(entity_id, form.get("supplier_id"))
+        if supplier is None:
+            raise Refused("Choose a supplier from the list.", 422)
     account = find_account(entity_id, form.get("account_id"))
     if account is None:
         raise Refused("Choose an account code from the list.", 422)
@@ -227,6 +234,8 @@ def add_expense_line(request):
     draft = find_draft(entity_id, day)
     if draft is None:
         raise Refused(NO_DRAFT, 409, to="opening")
+    if read_name is not None:
+        supplier = _reader_supplier(entity_id, read_name)
     _ask_about_duplicates(form, draft, supplier, amount)
     try:
         line = add_expense(draft, request.auth_user, amount=amount, description=description, supplier=supplier,
@@ -234,6 +243,29 @@ def add_expense_line(request):
     except ExpenseRefused as refused:
         raise Refused(refused.message, 409) from None
     return JsonResponse({"line": lines_payload([line])[0], "total": out(draft.expense_total)}, status=201)
+
+
+def _reader_supplier_name(entity_id, form) -> str | None:
+    """The supplier the receipt reader read and the company does not have (the user, 2026-11-23: a
+    missing contact is added automatically, when the line is saved - even by someone who may not add
+    contacts by hand). Only a name the reader signed for this company counts (``new_supplier_token``,
+    ``minty_shared.ai``); a chosen ``supplier_id`` wins. None when there is no token."""
+    token = form.get("new_supplier_token")
+    if form.get("supplier_id") or not token:
+        return None
+    name = ai.new_supplier_name(settings.SECRET_KEY, token, entity_id)
+    if name is None:
+        raise Refused(READER_SUPPLIER_GONE, 422)
+    return name
+
+
+def _reader_supplier(entity_id, name: str) -> XeroContactSync:
+    """The read name as the company's supplier, once every other check has passed: the one it has,
+    else added as ``POST /suppliers`` adds one (C5) - with no permission check, by the user's rule."""
+    try:
+        return create_supplier(entity_id, name)
+    except SupplierRefused as refused:
+        raise Refused(refused.message, refused.status) from None
 
 
 def _ask_about_duplicates(form, report, supplier, amount, exclude_id=None) -> None:
@@ -299,7 +331,8 @@ def edit_expense_line(request, line_id: str):
         if len(description) > MAX_DESCRIPTION:
             raise Refused(f"Keep the description to {MAX_DESCRIPTION} characters or fewer.", 422)
     supplier = account = None
-    if form.get("supplier_id"):
+    read_name = _reader_supplier_name(entity_id, form)
+    if read_name is None and form.get("supplier_id"):
         supplier = find_supplier(entity_id, form.get("supplier_id"))
         if supplier is None:
             raise Refused("Choose a supplier from the list.", 422)
@@ -330,6 +363,8 @@ def edit_expense_line(request, line_id: str):
     if exchange is None:
         exchange = CLEAR_EXCHANGE if cents(amount) != cents(line.amount) else KEEP_EXCHANGE
 
+    if read_name is not None:
+        supplier = _reader_supplier(entity_id, read_name)
     _ask_about_duplicates(form, report, supplier or line.contact, amount, exclude_id=line.id)
     try:
         line = update_expense(report, line, request.auth_user, amount=amount, description=description, supplier=supplier,

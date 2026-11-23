@@ -601,6 +601,129 @@ def test_a_contact_created_on_the_expenses_step_is_saved_and_carried_by_the_new_
     assert page["lines"][0]["supplier"] == {"id": "con-new", "name": "Corner Bakery"}
 
 
+# ---- a supplier the receipt reader read (the user, 2026-11-23) ---------------------------------------
+
+
+def _token(shop, name="Corner Bakery", entity_id=None):
+    from django.conf import settings
+    from minty_shared import ai
+
+    return ai.new_supplier_token(settings.SECRET_KEY, entity_id or shop.entity.id, name)
+
+
+def test_a_read_supplier_the_company_lacks_is_added_with_the_line(client, shop, lists, s3):
+    """Offline (no Xero organisation): the supplier is the company's own row, and the line uses it."""
+    draft = _draft(shop)
+
+    added = _add(client, shop, supplier_id="", new_supplier_token=_token(shop))
+
+    assert added.status_code == 201, added.content
+    made = XeroContactSync.objects.get(entity_id=shop.entity.id, name="Corner Bakery")
+    assert (made.xero_contact_id, made.source, made.record_status) == (None, "user", "active")
+    [line] = ReportExpense.objects.filter(report_id=draft.id)
+    assert line.contact_id == made.id
+    assert added.json()["line"]["supplier"] == {"id": str(made.id), "name": "Corner Bakery"}
+
+
+def test_a_read_supplier_is_made_in_xero_when_live(client, shop, lists, s3, monkeypatch):
+    from minty_db.models import Entity
+
+    from petty_cash.tests.test_suppliers import ORG, FakeHttp
+
+    fake = FakeHttp()
+    monkeypatch.setattr("requests.post", fake.post)
+    monkeypatch.setattr("requests.get", fake.get)
+    Entity.objects.filter(id=shop.entity.id).update(xero_org_id=ORG, status="connected")
+    draft = _draft(shop)
+
+    added = _add(client, shop, supplier_id="", new_supplier_token=_token(shop))
+
+    assert added.status_code == 201, added.content
+    made = XeroContactSync.objects.get(entity_id=shop.entity.id, xero_contact_id="con-new")
+    assert ReportExpense.objects.get(report_id=draft.id).contact_id == made.id
+
+
+def test_a_read_supplier_the_company_has_is_that_one(client, shop, lists, s3):
+    draft = _draft(shop)
+    before = XeroContactSync.objects.count()
+
+    added = _add(client, shop, supplier_id="", new_supplier_token=_token(shop, "abc  supplies"))
+
+    assert added.status_code == 201, added.content
+    assert XeroContactSync.objects.count() == before
+    held = XeroContactSync.objects.get(xero_contact_id="con-0001")
+    assert ReportExpense.objects.get(report_id=draft.id).contact_id == held.id
+
+
+def test_a_cashier_adds_a_read_supplier_too(client, shop, lists, s3):
+    _draft(shop)
+    cashier = make_user("cashier@test.com")
+    UserEntity.objects.create(user_id=cashier.id, entity_id=shop.entity.id, role=EntityRole.CASHIER, approved=True)
+
+    added = _add(client, shop, user=cashier, supplier_id="", new_supplier_token=_token(shop))
+
+    assert added.status_code == 201, added.content
+    assert XeroContactSync.objects.filter(entity_id=shop.entity.id, name="Corner Bakery").exists()
+
+
+@pytest.mark.parametrize("token", ["forged.token", "other"], ids=["altered", "another-company"])
+def test_a_bad_reader_token_is_a_422_and_nothing_is_added(client, shop, lists, s3, token):
+    _draft(shop)
+    if token == "other":
+        token = _token(shop, entity_id=uuid.uuid4())
+
+    added = _add(client, shop, supplier_id="", new_supplier_token=token)
+
+    assert added.status_code == 422
+    assert added.json()["error"] == "The suggested contact has expired. Choose a contact from the list or add it."
+    assert not XeroContactSync.objects.filter(name="Corner Bakery").exists()
+    assert not ReportExpense.objects.exists() and s3.objects == {}
+
+
+def test_a_line_refused_for_another_reason_adds_no_supplier(client, shop, lists, s3):
+    _draft(shop)
+
+    added = _add(client, shop, supplier_id="", new_supplier_token=_token(shop), amount="0")
+
+    assert added.status_code == 422
+    assert not XeroContactSync.objects.filter(name="Corner Bakery").exists()
+
+
+def test_a_chosen_supplier_wins_over_a_reader_token(client, shop, lists, s3):
+    draft = _draft(shop)
+
+    added = _add(client, shop, new_supplier_token=_token(shop))
+
+    assert added.status_code == 201, added.content
+    assert not XeroContactSync.objects.filter(name="Corner Bakery").exists()
+    held = XeroContactSync.objects.get(xero_contact_id="con-0001")
+    assert ReportExpense.objects.get(report_id=draft.id).contact_id == held.id
+
+
+def test_an_edit_takes_a_read_supplier_too(client, shop, lists, s3):
+    draft = _draft(shop)
+    line, _ = _line(shop, draft, s3)
+
+    edited = _edit(client, shop, line.id, new_supplier_token=_token(shop))
+
+    assert edited.status_code == 200, edited.content
+    made = XeroContactSync.objects.get(entity_id=shop.entity.id, name="Corner Bakery")
+    line.refresh_from_db()
+    assert line.contact_id == made.id
+
+
+def test_an_edit_with_a_bad_reader_token_changes_nothing(client, shop, lists, s3):
+    draft = _draft(shop)
+    line, _ = _line(shop, draft, s3)
+
+    edited = _edit(client, shop, line.id, new_supplier_token="forged.token", amount="5")
+
+    assert edited.status_code == 422
+    line.refresh_from_db()
+    assert line.amount == Decimal("1012.50")
+    assert not XeroContactSync.objects.filter(name="Corner Bakery").exists()
+
+
 # ---- the duplicate reminder (owner's decisions doc DUP1, 2026-11-19) ---------------------------------
 
 

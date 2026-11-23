@@ -26,6 +26,7 @@ import logging
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
+from django.conf import settings
 from minty_db.models import CurrencyInfo, Entity
 from minty_shared import ai, ai_prompt, fx
 from minty_shared.django import ai_allowance
@@ -105,11 +106,16 @@ def validate(parsed: Reading, context: dict, aliases: ai_prompt.Aliases) -> dict
     else:
         if (parsed.supplier_contact_id or "").strip():
             logger.info("receipt reader: dropped a supplier id not in the sent list")
-        # No match, but the name read off the receipt is handed on as `detected_name` - a
-        # starting point for New Supplier, never a contact (creating one stays the person's
-        # click). Untrusted text: stripped and capped.
-        supplier = ai.checked("", {"contact_id": "",
-                                   "detected_name": (parsed.supplier_name or "").strip()[:100]})
+        # No match: the name read off the receipt is handed on as `detected_name`, with
+        # `new_supplier_token` - the name signed for this company - which saving the line turns into
+        # the supplier (the user, 2026-11-23: a missing contact is added automatically, at save,
+        # never here). Untrusted text: stripped and capped.
+        name = " ".join((parsed.supplier_name or "").split())[:ai.NEW_SUPPLIER_MAX_NAME]
+        extra = {"contact_id": "", "detected_name": name}
+        if name:
+            extra["new_supplier_token"] = ai.new_supplier_token(settings.SECRET_KEY,
+                                                                context["entity"]["id"], name)
+        supplier = ai.checked("", extra)
 
     account_id = aliases.account(parsed.account_id) or ""
     if account_id in accounts:

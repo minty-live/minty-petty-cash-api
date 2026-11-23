@@ -276,7 +276,23 @@ def test_an_unmatched_supplier_name_is_offered_capped(client, shop, model):
     s, _ = _read(client, shop, model, supplier_contact_id="", supplier_name="z" * 400)
     assert len(s["supplier"]["detected_name"]) == 100
     s, _ = _read(client, shop, model)
-    assert "detected_name" not in s["supplier"]
+    assert "detected_name" not in s["supplier"] and "new_supplier_token" not in s["supplier"]
+
+
+def test_an_unmatched_supplier_comes_with_its_name_signed_for_this_company(client, shop, model, settings):
+    """The user, 2026-11-23: a missing contact is added automatically when the line is saved; the
+    token is the only way the save takes the name (never the page's word)."""
+    from minty_shared import ai
+
+    s, _ = _read(client, shop, model, supplier_contact_id="", supplier_name="  Caspita   Restaurant ")
+    token = s["supplier"]["new_supplier_token"]
+    assert ai.new_supplier_name(settings.SECRET_KEY, token, shop.entity.id) == "Caspita Restaurant"
+    assert ai.new_supplier_name(settings.SECRET_KEY, token, "another-company") is None
+
+
+def test_no_name_read_means_no_token(client, shop, model):
+    s, _ = _read(client, shop, model, supplier_contact_id="", supplier_name="  ")
+    assert s["supplier"]["detected_name"] == "" and "new_supplier_token" not in s["supplier"]
 
 
 @pytest.mark.parametrize("amount", [0, -50, 99_999_999_999])
