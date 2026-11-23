@@ -86,7 +86,7 @@ def test_a_new_supplier_is_created_in_xero_and_kept_as_a_synced_contact(client, 
     resp = _post(client, connected, {"name": " Corner Bakery "})
 
     assert resp.status_code == 201 and resp.json() == {"id": "con-new", "name": "Corner Bakery"}
-    assert [s["params"]["searchTerm"] for s in http.searched] == ["Corner Bakery"]
+    assert [s["params"]["searchTerm"] for s in http.searched] == ["Corner"]  # its longest word (the first of equals)
     token_call, xero_call = http.sent
     assert xero_call["url"] == CONTACTS_URL
     assert xero_call["headers"]["Authorization"] == "Bearer xero-access"
@@ -189,7 +189,75 @@ def test_live_a_supplier_kept_only_in_minty_is_put_in_xero_too_never_a_second(cl
     own.refresh_from_db()
     assert (own.xero_contact_id, own.xero_org_id) == ("con-new", ORG)
     assert XeroContactSync.objects.filter(entity_id=connected.entity.id).count() == 1
-    assert [s["params"]["searchTerm"] for s in http.searched] == ["Corner Bakery"]
+    assert [s["params"]["searchTerm"] for s in http.searched] == ["Corner"]  # its longest word (the first of equals)
+
+
+def test_a_name_typed_another_way_is_that_supplier_never_a_second(client, connected, http):
+    """The user, 2026-11-23: case, spaces and punctuation are ignored ("7 Eleven" is "7-Eleven")."""
+    linked = XeroContactSync.objects.create(entity_id=connected.entity.id, name="7-Eleven",
+                                            xero_contact_id="con-7", xero_org_id=ORG)
+
+    resp = _post(client, connected, {"name": "7 eleven"})
+
+    assert resp.status_code == 201 and resp.json()["id"] == linked.xero_contact_id
+    assert XeroContactSync.objects.filter(entity_id=connected.entity.id).count() == 1
+    assert http.sent == [] and http.searched == []
+
+
+def test_xeros_contact_typed_another_way_is_found_and_linked_never_a_twin(client, connected, http):
+    """Xero's search is a substring search, so it is asked for the name's longest word and the
+    answer's names are compared as Minty compares them."""
+    http.found = [{"ContactID": "con-7c", "Name": "7-Eleven Central", "ContactStatus": "ACTIVE"},
+                  {"ContactID": "con-7", "Name": "7-ELEVEN", "ContactStatus": "ACTIVE"}]
+
+    resp = _post(client, connected, {"name": "7 Eleven"})
+
+    assert resp.status_code == 201 and resp.json()["id"] == "con-7"
+    assert [s["params"]["searchTerm"] for s in http.searched] == ["Eleven"]
+    assert [s["url"] for s in http.sent] == [TOKEN_URL]  # nothing made in Xero
+
+
+def test_the_lists_hold_the_current_organisation_s_contacts_and_minty_s_own(connected):
+    """As Payment Request (the user, 2026-11-23): a company's contacts from an organisation it was
+    connected to before are off its pickers, its reader and its line checks; the contacts with no
+    organisation recorded (made in Minty, or older rows) stay."""
+    from petty_cash.services.expenses import find_supplier, public_id, suppliers
+
+    entity_id = connected.entity.id
+    mine = XeroContactSync.objects.create(entity_id=entity_id, xero_contact_id="con-now", xero_org_id=ORG,
+                                          name="Now Ltd")
+    own = XeroContactSync.objects.create(entity_id=entity_id, name="Own Ltd", source="user")
+    old = XeroContactSync.objects.create(entity_id=entity_id, xero_contact_id="con-old", xero_org_id="org-old",
+                                         name="Old Ltd")
+
+    assert set(suppliers(entity_id)) == {mine, own}
+    assert find_supplier(entity_id, public_id(old)) is None
+    # no organisation at all: nothing to scope against, every contact is listed
+    Entity.objects.filter(id=entity_id).update(xero_org_id=None, status="onboarding")
+    assert set(suppliers(entity_id)) == {mine, own, old}
+
+
+def test_a_name_only_another_organisation_holds_is_a_new_supplier_here(client, connected, http):
+    """Never the old organisation's contact - it is on no list here and Xero would not know it."""
+    old = XeroContactSync.objects.create(entity_id=connected.entity.id, xero_contact_id="con-old",
+                                         xero_org_id="org-old", name="7-Eleven")
+
+    resp = _post(client, connected, {"name": "7 Eleven"})
+
+    assert resp.status_code == 201 and resp.json()["id"] == "con-new"
+    old.refresh_from_db()
+    assert (old.xero_contact_id, old.xero_org_id, old.record_status) == ("con-old", "org-old", "active")
+
+
+def test_a_deleted_contact_of_another_organisation_is_never_brought_back(client, connected, http):
+    gone = XeroContactSync.objects.create(entity_id=connected.entity.id, xero_contact_id="con-old",
+                                          xero_org_id="org-old", name="Corner Bakery", record_status="archived")
+
+    resp = _post(client, connected, {"name": "Corner Bakery"})
+
+    assert resp.status_code == 201 and resp.json()["id"] == "con-new"
+    gone.refresh_from_db()
+    assert gone.record_status == "archived"
 
 
 def test_offline_a_supplier_kept_only_in_minty_stays_so(client, shop, http):

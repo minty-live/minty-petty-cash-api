@@ -127,7 +127,7 @@ def test_a_receipt_is_read_against_the_company_s_own_lists(client, shop, model):
     s = body["suggestions"]
     # no confidence is asked (owner, 2026-11-20): every value is filled and marked to check
     assert s["supplier"] == {"value": "ABC Supplies", "confidence": 0.0, "band": "medium",
-                             "applied": True, "contact_id": "con-0001"}
+                             "applied": True, "contact_id": "con-0001", "read_name": "ABC Supplies"}
     assert s["account"]["account_id"] == "acc-0001" and s["account"]["value"] == "400 Advertising"
     assert s["amount"]["value"] == "120.00" and s["description"]["value"] == "Flyers"
     assert s["document_date"]["value"] == "2026-08-28"
@@ -252,7 +252,7 @@ def _read(client, shop, model, **reply):
 
 
 def test_a_supplier_id_not_sent_is_dropped_and_the_rest_survives(client, shop, model):
-    s, _ = _read(client, shop, model, supplier_contact_id="con-invented")
+    s, _ = _read(client, shop, model, supplier_contact_id="con-invented", supplier_name="Other Org Ltd")
     assert s["supplier"]["contact_id"] == "" and s["supplier"]["applied"] is False
     assert s["amount"]["applied"] is True
 
@@ -264,9 +264,26 @@ def test_an_account_id_not_sent_is_dropped(client, shop, model, account_id):
     assert s["account"]["account_id"] == "" and s["account"]["applied"] is False
 
 
-def test_a_plausible_name_does_not_rescue_a_bad_id(client, shop, model):
-    s, _ = _read(client, shop, model, supplier_contact_id="", supplier_name="ABC Supplies")
-    assert s["supplier"]["contact_id"] == ""
+@pytest.mark.parametrize("answered", ["", "con-invented"], ids=["no-id", "an-id-not-sent"])
+def test_the_same_name_in_the_list_is_that_supplier_however_it_is_typed(client, shop, model, answered):
+    """The user, 2026-11-23: a supplier the list has is chosen, never offered as a new one - the
+    name as printed compared as Minty compares names (case, spaces, punctuation ignored)."""
+    s, _ = _read(client, shop, model, supplier_contact_id=answered, supplier_name="abc-SUPPLIES")
+    assert (s["supplier"]["contact_id"], s["supplier"]["value"]) == ("con-0001", "ABC Supplies")
+    assert s["supplier"]["applied"] is True
+    assert "detected_name" not in s["supplier"] and "new_supplier_token" not in s["supplier"]
+
+
+def test_the_name_as_printed_comes_with_the_chosen_supplier(client, shop, model):
+    """The user, 2026-11-23: the page shows the receipt's name beside a "similar" pick ("滬江 -> Wu
+    Kong") so a wrong one is easy to spot."""
+    _policy(default_grant={"tokens": 100000})  # three reads
+    s, _ = _read(client, shop, model, supplier_name="  ABC   Supplies (Central) ")
+    assert (s["supplier"]["contact_id"], s["supplier"]["read_name"]) == ("con-0001", "ABC Supplies (Central)")
+    s, _ = _read(client, shop, model, supplier_contact_id="", supplier_name="Caspita")
+    assert s["supplier"]["read_name"] == "Caspita"
+    s, _ = _read(client, shop, model, supplier_name=" ")
+    assert "read_name" not in s["supplier"]
 
 
 def test_an_unmatched_supplier_name_is_offered_capped(client, shop, model):

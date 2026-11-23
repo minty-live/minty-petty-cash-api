@@ -20,12 +20,13 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Exists, OuterRef
+from django.db.models import Exists, OuterRef, Q
 from django.db.models.functions import Lower
 from minty_db.enums import ReportStatus
 from minty_db.models import (
     AccountInfo,
     Attachment,
+    Entity,
     EntityAccountXero,
     Report,
     ReportExpense,
@@ -103,9 +104,21 @@ def find_account(entity_id, value) -> AccountInfo | None:
 
 def suppliers(entity_id):
     """The company's active suppliers, A to Z - the only ones a line can pick. Archived and merged
-    ones are off every picker (owner, 2026-11-12: a deleted contact leaves the lists)."""
-    return XeroContactSync.objects.filter(entity_id=entity_id, record_status="active",
-                                          merged_into__isnull=True).order_by(Lower("name"))
+    ones are off every picker (owner, 2026-11-12: a deleted contact leaves the lists). As Payment
+    Request's list (the user, 2026-11-23): with a Xero organisation, its contacts and those with no
+    organisation recorded (made in Minty, or older rows) - never one of an organisation the company
+    was connected to before; with none, every contact."""
+    rows = XeroContactSync.objects.filter(entity_id=entity_id, record_status="active", merged_into__isnull=True)
+    return rows.filter(org_scope(entity_id)).order_by(Lower("name"))
+
+
+def org_scope(entity_id) -> Q:
+    """The company's own contacts: with a Xero organisation, its contacts and those with no
+    organisation recorded; with none, all of them (Payment Request's ``xero_org_scope``)."""
+    org = Entity.objects.filter(id=entity_id).values_list("xero_org_id", flat=True).first()
+    if not org:
+        return Q()
+    return Q(xero_org_id=str(org)) | Q(xero_org_id="") | Q(xero_org_id__isnull=True)
 
 
 def expense_accounts(entity_id):

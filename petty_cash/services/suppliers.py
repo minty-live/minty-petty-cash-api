@@ -4,7 +4,7 @@ token comes from Flask (``core/xero_tokens.py``); Flask retried once after its o
 401/403, which is the token service's job here, so a refusal from Xero is final.
 
 Never blocked behind Xero, never a duplicate (owner, 2026-11-12): a name the company already has
-(case and inner spaces ignored) is that supplier - live on Xero, one kept only in Minty is put in
+(case, spaces and punctuation ignored - ``minty_shared.names``) is that supplier - live on Xero, one kept only in Minty is put in
 Xero too (owner's decisions doc C5, 2026-11-19); with no live connection the supplier is the
 company's own row (no Xero id - publish puts it in Xero, C1); live, Xero's contact of that name is
 linked from the stored copies, else searched in Xero, before one is made there. A supplier the
@@ -19,8 +19,10 @@ import logging
 
 from django.db import IntegrityError, transaction
 from minty_db.models import Entity, XeroContact, XeroContactSync
+from minty_shared import names
 
 from core.xero_tokens import XeroTokenUnavailable, xero_token
+from petty_cash.services.expenses import org_scope, suppliers
 from petty_cash.services.xero_settings import minty_on_its_own
 from petty_cash.xero.contacts import XeroContactUnavailable, found_or_made
 
@@ -42,15 +44,10 @@ class SupplierRefused(Exception):
         self.status = status
 
 
-def _key(name) -> str:
-    return " ".join(str(name or "").split()).lower()
-
-
 def _held(entity_id, name: str) -> XeroContactSync | None:
-    """The company's active supplier of that name (case and inner spaces ignored), if any."""
-    return next((c for c in XeroContactSync.objects.filter(entity_id=entity_id, record_status="active",
-                                                           merged_into__isnull=True)
-                 if _key(c.name) == _key(name)), None)
+    """The company's supplier of that name (case, spaces and punctuation ignored) on its lists
+    (``expenses.suppliers``: never one of an organisation it was connected to before), if any."""
+    return next((c for c in suppliers(entity_id) if names.same_name(c.name, name)), None)
 
 
 def _kept_in_minty(entity_id, name: str) -> XeroContactSync:
@@ -74,7 +71,8 @@ def _access_token(entity_id) -> str:
 def _brought_back(entity: Entity, name: str, offline: bool) -> XeroContactSync | None:
     """The supplier the company deleted with this name, brought back; None when there is none."""
     gone = sorted((c for c in XeroContactSync.objects.filter(entity_id=entity.id, record_status="archived",
-                                                             merged_into__isnull=True) if _key(c.name) == _key(name)),
+                                                             merged_into__isnull=True).filter(org_scope(entity.id))
+                   if names.same_name(c.name, name)),
                   key=lambda c: not c.xero_contact_id)
     if gone:
         row = gone[0]
@@ -89,7 +87,7 @@ def _brought_back(entity: Entity, name: str, offline: bool) -> XeroContactSync |
     held = set(XeroContactSync.objects.filter(entity_id=entity.id, xero_contact_id__isnull=False)
                .values_list("xero_contact_id", flat=True))
     copy = next((c for c in XeroContact.objects.filter(entity_id=entity.id, xero_org_id=str(entity.xero_org_id))
-                 .exclude(status="ACTIVE") if _key(c.name) == _key(name) and c.xero_guid not in held), None)
+                 .exclude(status="ACTIVE") if names.same_name(c.name, name) and c.xero_guid not in held), None)
     if copy is None:
         return None
     # linked as it stands, not restored (C4): publish asks about an archived one
@@ -101,7 +99,7 @@ def _brought_back(entity: Entity, name: str, offline: bool) -> XeroContactSync |
 
 
 def _found_or_made(entity: Entity, name: str) -> str:
-    """The ContactID of Xero's contact of ``name`` (searched live, case and extra spaces ignored),
+    """The ContactID of Xero's contact of ``name`` (searched live, case, spaces and punctuation ignored),
     else of one made there as a supplier (C5). Raises ``SupplierRefused``."""
     token = _access_token(entity.id)
     try:
@@ -148,7 +146,7 @@ def create_supplier(entity_id, name: str) -> XeroContactSync:
         return _kept_in_minty(entity_id, name)
     copy = next((c for c in XeroContact.objects.filter(entity_id=entity_id, xero_org_id=str(entity.xero_org_id),
                                                        status="ACTIVE")
-                 if _key(c.name) == _key(name)
+                 if names.same_name(c.name, name)
                  and not XeroContactSync.objects.filter(entity_id=entity_id, xero_contact_id=c.xero_guid).exists()),
                 None)
     if copy is not None:
@@ -158,7 +156,7 @@ def create_supplier(entity_id, name: str) -> XeroContactSync:
         logger.info("Supplier %s linked to Xero's contact of its name for company %s", row.id, entity_id)
         return row
     # Added while connected, it is made in both (owner's decisions doc C5, 2026-11-19): Xero's contact
-    # of the name (searched live, case and extra spaces ignored) is linked, else it is made there as a
+    # of the name (searched live, case, spaces and punctuation ignored) is linked, else it is made there as a
     # supplier - never a twin in Xero.
     xero_contact_id = _found_or_made(entity, name)
     created_name = " ".join(name.split())[:MAX_NAME]

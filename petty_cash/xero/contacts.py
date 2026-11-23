@@ -18,6 +18,7 @@ import logging
 import requests
 from django.conf import settings
 from minty_db.models import XeroContactSync
+from minty_shared import names
 
 logger = logging.getLogger("petty-cash-api")
 
@@ -34,24 +35,23 @@ class XeroContactUnavailable(Exception):
         self.status, self.no_id = status, no_id
 
 
-def name_key(name) -> str:
-    """A contact's name as Minty compares it: case and extra spaces ignored."""
-    return " ".join(str(name or "").split()).lower()
-
-
 def _headers(access_token: str, org) -> dict:
     return {"Authorization": f"Bearer {access_token}", "Xero-Tenant-Id": str(org), "Accept": "application/json",
             "Content-Type": "application/json"}
 
 
 def find_by_name(access_token: str, org, name: str) -> dict | None:
-    """Xero's active contact named ``name`` (case and extra spaces ignored), or None. Xero's
-    ``searchTerm`` is a loose case-insensitive search (Name, FirstName, LastName, ContactNumber,
-    EmailAddress - the accounting API spec's ``getContacts``), so only an exact name counts.
-    Raises ``XeroContactUnavailable`` when Xero can't be asked."""
+    """Xero's active contact named ``name`` (case, spaces and punctuation ignored), or None. Xero's
+    ``searchTerm`` is a loose case-insensitive substring search (Name, FirstName, LastName,
+    ContactNumber, EmailAddress - the accounting API spec's ``getContacts``), so it is asked for the
+    name's longest word (``names.search_term``: "7 Eleven" finds "7-Eleven") and only the same name
+    counts. Raises ``XeroContactUnavailable`` when Xero can't be asked."""
+    key = names.name_key(name)
+    if not key:
+        return None
     try:
         response = requests.get(f"{settings.XERO_API_BASE_URL}/Contacts", headers=_headers(access_token, org),
-                                params={"searchTerm": " ".join(str(name).split()), "page": 1}, timeout=TIMEOUT)
+                                params={"searchTerm": names.search_term(name), "page": 1}, timeout=TIMEOUT)
     except requests.RequestException as exc:
         logger.error("Xero unreachable looking for contact %r: %s", name, exc)
         raise XeroContactUnavailable from None
@@ -64,8 +64,7 @@ def find_by_name(access_token: str, org, name: str) -> dict | None:
     except ValueError:
         logger.error("Xero answered no JSON looking for contact %r", name)
         raise XeroContactUnavailable from None
-    key = name_key(name)
-    return next((c for c in contacts if c.get("ContactID") and name_key(c.get("Name")) == key
+    return next((c for c in contacts if c.get("ContactID") and names.name_key(c.get("Name")) == key
                  and str(c.get("ContactStatus") or "ACTIVE").upper() == "ACTIVE"), None)
 
 
