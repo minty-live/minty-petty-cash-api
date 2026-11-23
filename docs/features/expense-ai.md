@@ -136,15 +136,14 @@ models' failover, so one call per read:
 
 ## Provider
 
-**Gemini on Vertex AI, `asia-southeast1` (Singapore), project `minty-515207`** (owner,
-2026-11-20; minty-shared v0.11). The direct Gemini API is gone - Google AI Studio does not serve
-Hong Kong, and Vertex keeps the processing in the region the services run in. The call is
-`models.generate_content`: Vertex serves `interactions.create` only in `global`, `us` and `eu`. In
-`asia-southeast1` only `gemini-3.5-flash` answered on 2026-11-20 (`3.5-flash-lite` and `3.8-flash`
-404 there), so that is the policy's model, with no backup. The service account `minty-ai` (role
-Vertex AI User) authenticates by its JSON key file. Verified that day with `expense_ai_check`: a
-round trip in 3.6 s. **Not yet on Render**: production and development still run the released
-code on the direct Gemini API's free tier until v0.11 ships with the key file.
+**Gemini on Vertex AI's global endpoint, project `minty-515207`** (owner, 2026-11-23; minty-shared
+v0.12): no region setting - global serves every model, and the policy's model is
+`gemini-3.5-flash-lite`, which `asia-southeast1` (Singapore, the region from 2026-11-20 with
+`gemini-3.5-flash`) does not serve. A request may be processed in any Google region (no residency
+guarantee). The direct Gemini API is gone - Google AI Studio does not serve Hong Kong. The call is
+`models.generate_content`. Verified 2026-11-23: Flash-Lite answered on global in 1.7 s and failed in
+`asia-southeast1`. The service account `minty-ai` (role Vertex AI User) authenticates by its JSON
+key file (on Render a secret file, since v0.11 shipped on 2026-11-20).
 
 ## Configuration
 
@@ -154,7 +153,6 @@ code on the direct Gemini API's free tier until v0.11 ships with the key file.
 | `ai_policy` | `primary_model`, `backup_model` | the models tried, in order - above |
 | `ai_policy` | `timeout_s` (25, per model tried), `max_output_tokens` (4096, thinking included), `thinking_level` (`low`) | the call |
 | `ai_policy` | `max_file_mb` (10) | the receipt size cap |
-| `ai_policy` | `location` (`asia-southeast1`) | the Vertex AI region - it decides which models exist, so change the models with it (`--location`) |
 | environment | `GOOGLE_CLOUD_PROJECT` | Vertex AI's project (`minty-515207`); without it, no call is made (`not_configured`) |
 | environment | `GOOGLE_APPLICATION_CREDENTIALS` | the service account's key file (locally `C:\Github\vertex-minty-ai.json`; on Render a secret file) |
 

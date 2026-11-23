@@ -9,14 +9,14 @@
     python manage.py ai_policy --set-rules '[{"reads": 20, "period_days": 1}]'
     python manage.py ai_policy --receipt-reader off --invoice-reader on      # the readers' switches
     python manage.py ai_policy --timeout-s 30 --max-output-tokens 6000 --thinking-level medium --max-file-mb 10
-    python manage.py ai_policy --location asia-southeast1 --set-models gemini-3.5-flash --no-backup  # region + its model
 
 minty-db's ``ai_policy`` row and ``ai_grant`` rows (owner, 2026-11-18) are shared by Petty Cash and
 Payment Request, and both services read them on every read: a change here takes effect on the next
 read, no restart. A company reads against its grants; ``default_grant`` is the one it is given
 automatically, once, on its first read; ``--grant`` gives it another (a top-up, or a different
 size). The readers' switches and their timeout, token budget, thinking level and largest document
-are in the same row (owner, 2026-11-20; they were each service's environment). A change is checked
+are in the same row (owner, 2026-11-20; they were each service's environment). There is no region:
+every read is on Vertex AI's global endpoint (owner, 2026-11-23). A change is checked
 first (``minty_shared.django.ai_allowance``) and refused with the reason, so a typo cannot switch
 reading off. An UPDATE in SQL does the same, unchecked.
 """
@@ -50,8 +50,6 @@ class Command(BaseCommand):
         parser.add_argument("--max-output-tokens", type=int, help="the reply's budget, thinking included (256-65536)")
         parser.add_argument("--thinking-level", help="minimal, low, medium or high")
         parser.add_argument("--max-file-mb", type=int, help="the largest document read (1-20 MB)")
-        parser.add_argument("--location", help="the Vertex AI region, e.g. asia-southeast1 (it decides which "
-                                               "models exist: change the models with it)")
         parser.add_argument("--grant", metavar="ENTITY_ID", help="give this company a grant (with --tokens/--reads)")
         parser.add_argument("--tokens", type=int, help="with --grant: the tokens it gives")
         parser.add_argument("--reads", type=int, help="with --grant: the reads it gives")
@@ -127,7 +125,7 @@ class Command(BaseCommand):
         self.stdout.write(f"readers       : receipt {_on(s.receipt_reader_on)}, invoice {_on(s.invoice_reader_on)}")
         self.stdout.write(f"limits        : timeout {s.timeout_s} s, {s.max_output_tokens} output tokens, "
                           f"thinking {s.thinking_level}, files up to {s.max_file_mb} MB")
-        self.stdout.write(f"region        : {s.location} (Vertex AI)")
+        self.stdout.write(f"region        : {ai.VERTEX_LOCATION} (Vertex AI)")
         self.stdout.write(f"default grant : {json.dumps(_spec(policy.default_grant))}")
         self.stdout.write(f"extra caps    : {json.dumps([_rule(r) for r in policy.rules])}")
         if entity_id:
@@ -163,7 +161,7 @@ def _settings_given(options) -> dict:
     for flag, column in (("receipt_reader", "receipt_reader_on"), ("invoice_reader", "invoice_reader_on")):
         if options.get(flag) is not None:
             given[column] = options[flag] == "on"
-    for column in ("timeout_s", "max_output_tokens", "thinking_level", "max_file_mb", "location"):
+    for column in ("timeout_s", "max_output_tokens", "thinking_level", "max_file_mb"):
         if options.get(column) is not None:
             given[column] = options[column]
     return given

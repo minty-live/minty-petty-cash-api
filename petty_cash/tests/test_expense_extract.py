@@ -87,7 +87,7 @@ def _parts(request) -> list:
 @pytest.fixture
 def model(monkeypatch, ai_policy) -> FakeModel:
     fake = FakeModel()
-    monkeypatch.setattr(ai, "get_client", lambda timeout_s, region: fake)
+    monkeypatch.setattr(ai, "get_client", lambda timeout_s: fake)
     monkeypatch.setattr(ai.time, "sleep", lambda _s: None)
     return fake
 
@@ -336,7 +336,7 @@ def test_the_check_command_sends_a_generated_image_and_reports_the_round_trip(mo
     assert _parts(request)[1].inline_data.mime_type == "image/png"
     assert "Connectivity check" in _parts(request)[0].text
     assert "route            : Vertex AI" in out and "receipt reader   : on" in out
-    assert "location         : asia-southeast1" in out
+    assert "location         : global" in out  # owner, 2026-11-23: always Vertex's global endpoint
 
 
 def test_the_check_command_fails_loudly_when_the_model_does_not_answer(model):
@@ -590,7 +590,8 @@ def test_the_policy_command_gives_a_company_a_grant(ai_policy, shop, capsys):
     (["--max-output-tokens", "100"], "max_output_tokens"),
     (["--thinking-level", "extreme"], "thinking_level"),
     (["--max-file-mb", "50"], "at most 20"),
-    (["--location", "Asia Southeast1"], "location"),
+    # owner, 2026-11-23: no region setting - every read is on Vertex's global endpoint
+    (["--location", "global"], "unrecognized arguments"),
 ])
 def test_the_policy_command_refuses_a_change_that_would_break_reading(ai_policy, args, says):
     from django.core.management import CommandError, call_command
@@ -609,13 +610,12 @@ def test_the_policy_command_sets_the_readers_switches_and_limits(ai_policy, caps
 
     call_command("ai_policy", "--receipt-reader", "off", "--invoice-reader", "on", "--timeout-s", "40",
                  "--max-output-tokens", "6000", "--thinking-level", "medium", "--max-file-mb", "8",
-                 "--location", "global", "--by", "ops")
+                 "--by", "ops")
 
     ai_policy.refresh_from_db()
     assert (ai_policy.receipt_reader_on, ai_policy.invoice_reader_on) == (False, True)
     assert (ai_policy.timeout_s, ai_policy.max_output_tokens) == (40, 6000)
     assert (ai_policy.thinking_level, ai_policy.max_file_mb, ai_policy.updated_by) == ("medium", 8, "ops")
-    assert ai_policy.location == "global"
     assert ai_policy.primary_model == "gemini-3.8-flash" and ai_policy.default_grant == {"tokens": 10000}
     out = capsys.readouterr().out
     assert "readers       : receipt off, invoice on" in out

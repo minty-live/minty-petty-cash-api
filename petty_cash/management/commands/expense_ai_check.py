@@ -1,7 +1,7 @@
 """``python manage.py expense_ai_check`` - one round trip to the model, from where the code runs.
 
 Moved from Flask's ``flask expense-ai check`` (2026-11-04). It sends a tiny generated image, never a
-customer receipt, and prints the route (Vertex AI: its project and region), the models (``ai_policy``'s, in order), which one answered,
+customer receipt, and prints the route (Vertex AI: its project; always the global endpoint), the models (``ai_policy``'s, in order), which one answered,
 the latency and the token usage, so "is this
 configured correctly" is a fact rather than a guess. Exits 1 when the model did not answer.
 """
@@ -35,7 +35,7 @@ class Command(BaseCommand):
             raise CommandError("No usable ai_policy row - the readers are OFF and there is no model to check.")
         config = policy.reader(ai_allowance.READER_RECEIPT)
         models = policy.models
-        self.stdout.write(f"location         : {config.location}")
+        self.stdout.write(f"location         : {ai.VERTEX_LOCATION}")
         self.stdout.write(f"receipt reader   : {'on' if config.enabled else 'off'}")
         self.stdout.write(f"models           : {', '.join(models)}")
         self.stdout.write(f"thinking_level   : {config.thinking_level}")
