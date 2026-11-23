@@ -152,11 +152,20 @@ def validate(parsed: Reading, context: dict, aliases: ai_prompt.Aliases) -> dict
         "supplier": supplier,
         "account": account_field,
         "amount": ai.checked(amount_value),
-        "description": ai.checked((parsed.description or "").strip()[:_MAX_DESCRIPTION]),
+        "description": _description(parsed),
         "document_date": ai.checked(_iso_date(parsed.date)),
         "currency": currency,
         "entity_currency": context["entity"]["currency"],
+        "document_count": parsed.document_count,
     }
+
+
+def _description(parsed: Reading) -> dict:
+    """What was bought (owner, 2026-11-23): inferred from the supplier and context when the
+    receipt lists no items - then in the ``low`` band, so the page asks for a closer check."""
+    text = (parsed.description or "").strip()[:_MAX_DESCRIPTION]
+    inferred = bool(text) and parsed.description_inferred
+    return ai.checked(text, {"inferred": inferred, **({"band": "low"} if inferred else {})})
 
 
 def _iso_date(value: object) -> str:
@@ -212,7 +221,13 @@ def read_receipt(entity_id, user_id, data: bytes, mime: str, report_date: date |
         ai_allowance.finish(read_id, result)
     ai.log_read(config, result, entity_id=entity_id, user_id=user_id)
     answer = result.answer()
-    if answer["suggestions"]:
+    refusal = ai.evidence_refusal(answer["suggestions"]) if answer["suggestions"] else None
+    if refusal:
+        # several receipts in the file, or nothing describes what was paid for (owner, 2026-11-23):
+        # nothing is filled and the page says why; the read still counts (a model answered)
+        logger.info("receipt reader: refused reason=%s entity=%s", refusal, entity_id)
+        answer = {"suggestions": None, "reason": refusal}
+    elif answer["suggestions"]:
         # another currency: converted at Frankfurter's rate (owner, 2026-11-19) - after the read,
         # outside the model's failover, so it is asked once
         now = today()

@@ -83,9 +83,7 @@ minty-petty-cash-api's `python manage.py ai_policy`, never a release:
   after a spent grant reads 100%). Used up, the route answers `limit_reached` without asking the
   model and the page disables the button.
 - The in-process `RateLimiter` and `*_RATE_USER_PER_MIN`/`*_RATE_ENTITY_PER_HOUR` are gone (replaced).
-- **Production:** Vertex AI in `asia-southeast1` (owner, 2026-11-20; below) once minty-shared v0.11
-  is released; until then production still uses the direct Gemini API on the FREE tier, which does
-  not meet "approved providers only".
+- **Production:** Vertex AI on its `global` endpoint (minty-shared v0.12; below).
 
 ## The prompt (owner, 2026-11-20: "simple like this first")
 
@@ -104,8 +102,26 @@ tokens than the UUIDs and Xero ids, and nothing long for the model to copy wrong
 the person to check (`minty_shared.ai.checked`: band `medium`, `applied` when it has a value). The
 answer's shape to the web is unchanged (`supplier`, `account`, `amount`, `description`,
 `document_date`, `currency`, `entity_currency`). The 2026-11-19 prompt's extra rules went with it:
-the '$' currency rule, `date_raw` (no screen used it) and `card_slip_only` (a card slip alone now
-fills what the model read; the page's card-slip message has nothing to answer).
+the '$' currency rule, `date_raw` (no screen used it) and `card_slip_only` (replaced by the
+2026-11-23 evidence rule below).
+
+## Evidence (owner's launch decisions, 2026-11-23)
+
+The basis is IRD's "A Guide to Keeping Business Records" ("Receipts obtained"). A receipt shows the
+date, the supplier, the amount paid and what was paid for; when it doesn't say what was paid for (a
+card slip, a till receipt), "an additional notation should be recorded". The AI description is that
+notation. minty-shared-py v0.15:
+- **`date`** is a printed billing period's last day, otherwise the payment date. The exchange rate
+  is that same day's (owner's pick: one date for everything).
+- **`description`** is inferred from the supplier and context when no items are listed, with
+  `account_id` chosen to match, and `""` only when it can't be inferred. An inferred one
+  (`description_inferred`) comes in the `low` band with `inferred: true`, so the page says "please
+  check".
+- **`document_count`**: more than one receipt in the file answers `{suggestions: null, reason:
+  "several_documents"}` (the page asks for one receipt at a time); then an empty description
+  answers `reason: "no_description"` (the page says the document isn't enough evidence).
+  `ai.evidence_refusal` decides, after the read and before any rate is asked. Either refusal
+  still counts as a read: a model answered.
 
 ## The supplier (the user, 2026-11-23)
 

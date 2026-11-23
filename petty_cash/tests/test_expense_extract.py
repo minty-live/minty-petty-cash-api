@@ -340,9 +340,46 @@ EMPTY = {"supplier_contact_id": "", "supplier_name": "", "account_id": "", "amou
          "currency": "", "date": "", "description": ""}
 
 
-def test_nothing_usable_says_so(client, shop, model):
-    _, reason = _read(client, shop, model, **EMPTY)
-    assert reason == "no_usable_field"
+def test_nothing_usable_is_not_enough_evidence(client, shop, model):
+    # owner, 2026-11-23: nothing describes what was paid for, so the page says why
+    s, reason = _read(client, shop, model, **EMPTY)
+    assert (s, reason) == (None, "no_description")
+
+
+# --- the owner's launch decisions (2026-11-23, after IRD's "A Guide to Keeping Business Records")
+
+
+def test_a_receipt_with_no_description_is_not_enough_evidence(client, shop, model):
+    s, reason = _read(client, shop, model, description="  ")
+    assert (s, reason) == (None, "no_description")
+
+
+def test_several_receipts_in_one_file_are_refused_before_anything_else(client, shop, model):
+    s, reason = _read(client, shop, model, document_count=2, description="")
+    assert (s, reason) == (None, "several_documents")
+
+
+def test_an_inferred_description_is_filled_and_marked_to_check_harder(client, shop, model):
+    s, reason = _read(client, shop, model, description="Groceries", description_inferred=True)
+    assert reason is None
+    assert (s["description"]["value"], s["description"]["applied"]) == ("Groceries", True)
+    assert (s["description"]["band"], s["description"]["inferred"]) == ("low", True)
+    assert s["account"]["account_id"] == "acc-0001"  # the account is still chosen
+
+
+def test_a_printed_description_stays_in_the_usual_band(client, shop, model):
+    s, _ = _read(client, shop, model, description_inferred=False)
+    assert (s["description"]["band"], s["description"]["inferred"]) == ("medium", False)
+
+
+def test_a_refused_read_still_counts(client, shop, model):
+    model.answer = FakeResponse(_reply(document_count=3))
+
+    body = _extract(client, shop).json()
+
+    assert body["reason"] == "several_documents" and body["reader"]["percent_left"] == 43
+    [row] = AiRead.objects.filter(entity_id=shop.entity.id)
+    assert row.status == "ok"
 
 
 def test_the_instruction_is_the_owners_simple_prompt(shop):
@@ -452,7 +489,7 @@ def test_nothing_usable_is_still_a_read(client, shop, model):
 
     body = _extract(client, shop).json()
 
-    assert body["reason"] == "no_usable_field" and body["reader"]["percent_left"] == 43
+    assert body["reason"] == "no_description" and body["reader"]["percent_left"] == 43
 
 
 def test_payment_request_reads_use_the_same_grants(client, shop, model):
