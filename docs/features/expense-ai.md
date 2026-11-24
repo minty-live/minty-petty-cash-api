@@ -30,7 +30,8 @@ shares with minty-payment-request-api's invoice reader. The answer to the web is
 - `minty_shared.ai` (minty-shared-py, extra `ai`) - the engine: the switches, the models and their
   failover, the call and its one retry, usage and cost, and the ONE log line (numbers only, never a
   value read off a receipt; `model=` is the model that answered, `attempts=` the chain). `minty_shared.model_input` makes the small copy the model reads (an
-  image capped at 2048 px and saved once as JPEG; a PDF's first page). The stored receipt is never
+  image capped at 2048 px and saved once as JPEG; a PDF whole, every page - minty-shared v0.16, the
+  user 2026-11-24; the 10 MB limit stays). The stored receipt is never
   changed: it reaches B2 exactly as uploaded.
 - `python manage.py expense_ai_check` - one round-trip call with a generated image, from wherever
   the code runs, to prove the configuration (the policy's models, which one answered).
