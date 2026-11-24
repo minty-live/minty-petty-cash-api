@@ -24,6 +24,7 @@ from datetime import UTC, date, datetime
 import requests
 from minty_db.models import Report, ReportExpense
 
+from petty_cash.services import chart_view
 from petty_cash.services.cash import _money
 from petty_cash.xero import client, publish_record, steps
 from petty_cash.xero.errors import translate_xero_error
@@ -65,9 +66,11 @@ def entries(report: Report, record: dict) -> list[Entry]:
         if module == "expenses":
             ids = publish_record.recorded_expense_ids(record)
             lines = {str(line.id): line for line in ReportExpense.objects.filter(id__in=list(ids))}
+            accounts = chart_view.accounts(line.account_id for line in lines.values())  # names now
             for line_id, xero_id in ids.items():
                 line = lines.get(line_id)
-                label = (f"Expense {line.item or line.description or 'line'}, {_money(report, line.amount)}"
+                label = (f"Expense {chart_view.item_name(line, accounts) or line.description or 'line'}, "
+                         f"{_money(report, line.amount)}"
                          if line else "An expense no longer on this report")
                 found.append(Entry("expenses", line_id, xero_id, "BANK_TRANSACTION", label))
             continue

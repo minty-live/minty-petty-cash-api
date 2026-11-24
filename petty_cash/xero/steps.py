@@ -344,11 +344,17 @@ def cash_sales(run: Run, report: Report, lines, existing) -> tuple[int, int]:
         return 0, 1
 
 
+def _item(line: ReportExpense) -> str:
+    """The line's account name as the chart has it now (the user's rule, 2026-11-24); the saved
+    ``item`` only for a line with no account."""
+    return ((line.account.name if line.account else None) or line.item or "").strip()
+
+
 def _line_description(line: ReportExpense) -> str | None:
     """The expense's description in Xero: what the person typed; the account name
-    (``item``) only when they typed nothing, or a placeholder (the CSV export's rule)."""
+    (``_item``) only when they typed nothing, or a placeholder (the CSV export's rule)."""
     description = (line.description or "").strip()
-    return line.item if description in ("", "No description", "-") else description
+    return _item(line) if description in ("", "No description", "-") else description
 
 
 def expenses(run: Run, report: Report, existing: dict, only_ids=None) -> tuple[int, int]:
@@ -371,7 +377,7 @@ def expenses(run: Run, report: Report, existing: dict, only_ids=None) -> tuple[i
             if index and index % EXPENSE_BATCH == 0:
                 time.sleep(BATCH_PAUSE)
             contact = line.contact
-            label = f"Expense '{line.item}'"
+            label = f"Expense '{_item(line)}'"
             xero_contact = xero_id_for(run, contact) if contact else None
             meta = {"scope": "expense", "expense_id": str(line.id), "failed_contact_id": xero_contact,
                     "module": "expenses"}
@@ -387,7 +393,7 @@ def expenses(run: Run, report: Report, existing: dict, only_ids=None) -> tuple[i
                                  "taxType": "NONE"}],
                     label=label, meta=meta, existing_id=(existing or {}).get(str(line.id)), line=line,
                     # The name a lost supplier is made again under: the synced name, else the item.
-                    contact_name=(contact.name if contact and contact.name else None) or line.item,
+                    contact_name=(contact.name if contact and contact.name else None) or _item(line),
                 )
             except Exception:
                 logger.exception("Publish: expense line %s failed", line.id)

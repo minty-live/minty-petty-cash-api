@@ -10,11 +10,11 @@ from minty_db.models import (
     ReportExpense,
     ReportExpenseAttachment,
     User,
-    XeroContactSync,
 )
 
 from petty_cash.days import hk
 from petty_cash.money import cents
+from petty_cash.services import chart_view
 from petty_cash.services.reports import actual_cash_total
 
 
@@ -30,8 +30,9 @@ def _submitter(report: Report) -> str | None:
 
 def _expense_lines(report_id) -> list[dict]:
     rows = list(ReportExpense.objects.filter(report_id=report_id).order_by("created_at"))
-    contacts = dict(XeroContactSync.objects.filter(id__in=[r.contact_id for r in rows if r.contact_id])
-                    .values_list("id", "name"))
+    # the account and supplier as the chart has them now (the user's rule, 2026-11-24)
+    accounts = chart_view.accounts(r.account_id for r in rows)
+    contacts = chart_view.contacts(r.contact_id for r in rows)
     links = list(ReportExpenseAttachment.objects.filter(report_expense_id__in=[r.id for r in rows])
                  .values_list("report_expense_id", "attachment_id"))
     stored = set(Attachment.objects.filter(id__in=[a for _, a in links]).exclude(file_path__isnull=True)
@@ -41,7 +42,8 @@ def _expense_lines(report_id) -> list[dict]:
         if attachment_id in stored:
             receipts[line_id] = receipts.get(line_id, 0) + 1
     return [
-        {"id": str(r.id), "item": r.item, "contact_name": contacts.get(r.contact_id), "description": r.description,
+        {"id": str(r.id), "item": chart_view.item_name(r, accounts),
+         "contact_name": chart_view.contact_name(r, contacts) or None, "description": r.description,
          "amount": r.amount or 0, "receipts": receipts.get(r.id, 0)}
         for r in rows
     ]

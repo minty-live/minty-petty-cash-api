@@ -39,7 +39,6 @@ from django.conf import settings
 from django.http import HttpResponse, JsonResponse
 from minty_db.enums import ReportStatus
 from minty_db.models import (
-    AccountInfo,
     Attachment,
     Report,
     ReportExpense,
@@ -64,7 +63,7 @@ from petty_cash.routes._input import (
     query_day,
     require_edit,
 )
-from petty_cash.services import receipt_reader
+from petty_cash.services import chart_view, receipt_reader
 from petty_cash.services.expenses import (
     CLEAR_EXCHANGE,
     DUPLICATE,
@@ -111,8 +110,10 @@ def _receipt_name(attachment: Attachment) -> str:
 def lines_payload(rows) -> list[dict]:
     """Each line as the page reads it - the suppliers, accounts and receipts loaded in bulk."""
     rows = list(rows)
-    contacts = {c.id: c for c in XeroContactSync.objects.filter(id__in=[r.contact_id for r in rows if r.contact_id])}
-    accounts = {a.id: a for a in AccountInfo.objects.filter(id__in=[r.account_id for r in rows if r.account_id])}
+    # the supplier and account as the chart has them now - a merged one shows the one kept (the user's
+    # rule, 2026-11-24); ``item`` is the account's name now, the saved text only for a line with none
+    contacts = chart_view.contacts(r.contact_id for r in rows)
+    accounts = chart_view.accounts(r.account_id for r in rows)
     links = list(
         ReportExpenseAttachment.objects.filter(report_expense_id__in=[r.id for r in rows]).order_by("sort_order")
     )
@@ -126,16 +127,17 @@ def lines_payload(rows) -> list[dict]:
             )
     payload = []
     for row in rows:
-        contact, account = contacts.get(row.contact_id), accounts.get(row.account_id)
+        account = accounts.get(row.account_id) if row.account_id else None
+        supplier = contacts.get(row.contact_id) if row.contact_id else None
         payload.append(
             {
                 "id": str(row.id),
-                "item": row.item or "",
+                "item": chart_view.item_name(row, accounts),
                 "amount": out(row.amount),
                 "description": row.description or "",
-                "supplier": {"id": public_id(contact), "name": contact.name} if contact else None,
+                "supplier": {"id": public_id(supplier.row), "name": supplier.name} if supplier else None,
                 "account": (
-                    {"id": public_id(account), "code": account.xero_code or "", "name": account.name}
+                    {"id": public_id(account.row), "code": account.code, "name": account.name}
                     if account
                     else None
                 ),

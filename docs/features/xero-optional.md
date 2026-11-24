@@ -18,10 +18,13 @@ again.
 
 **The publish writes what it sent** (`publish._snapshot`, on every completed publish, for every
 company): each expense line's `published_account_code` / `published_account_name` and
-`published_contact_name`. No sync or later code change rewrites them - only the next publish. The
-screens and the CSV show each line's account and supplier as linked now (the owner's decisions doc A5,
-2026-11-19), so a re-map shows everywhere at once; the snapshot is only the fallback for a line whose
-account or supplier is gone (`petty_cash_report_csv.py`).
+`published_contact_name` - the record of what went to Xero, never shown. No sync or later code
+change rewrites them - only the next publish. The screens, the share link, the close page, the CSV and
+a new publish's labels and descriptions show each line's account and supplier as the chart has them
+now (the owner's decisions doc A5, 2026-11-19; the user's rule, 2026-11-24, `services/chart_view.py`):
+a merged account or contact shows the one kept, and `item` in every payload is the account's name
+now - the saved `item` only for a line with no account. A line whose account is gone shows no code
+or name in the CSV.
 
 Tests: `petty_cash/tests/test_minty_on_its_own.py` (both passes).
 

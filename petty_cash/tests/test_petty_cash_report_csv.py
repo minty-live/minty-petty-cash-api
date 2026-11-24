@@ -46,8 +46,9 @@ def _range(days_back_start=2, days_back_end=0):
 @pytest.fixture
 def books(shop):
     """Two submitted days (the first published) and a draft before them. The lines: one with its
-    account and supplier, one whose account and supplier were deleted (the keys emptied; the
-    published names stand in) and typed nothing, one on an account with a Minty code only and no
+    account and supplier, one whose account and supplier were deleted (the keys emptied; what was
+    published is never shown - the user's rule, 2026-11-24 - so its saved item stands in for the
+    description it never had) and typed nothing, one on an account with a Minty code only and no
     supplier. The sales: Cash Sales, Octopus and Foodpanda in the company's order; the second day
     has a zero (left out), a method since removed that still holds an amount (after the others),
     and its cash only in the report's cash column (as older reports keep it)."""
@@ -109,7 +110,7 @@ ROWS = [
     [_day(1), "Sale", "", "", "", "Octopus", "25.00", *NO_FIGURES, "HKD"],
     [_day(1), "Sale", "", "", "", "Foodpanda", "15.00", *NO_FIGURES, "HKD"],
     [_day(1), "Expense", "445", "Tape", "ABC Supplies", "Tape, the wide roll", "-25.10", *NO_FIGURES, "HKD"],
-    [_day(1), "Expense", "400", "Advertising", "Old Supplier", "Blank", "-10.00", *NO_FIGURES, "HKD"],
+    [_day(1), "Expense", "", "", "", "Blank", "-10.00", *NO_FIGURES, "HKD"],
     [_day(0), "Daily report", "", "", "", "", "",
      "47.40", "0.00", "60.00", "8.00", "12.50", "0.00", "1.00", "95.90", "HKD"],
     [_day(0), "Sale", "", "", "", "Cash Sales", "60.00", *NO_FIGURES, "HKD"],
@@ -225,3 +226,20 @@ def test_another_companys_export_is_refused_at_the_door(client, books):
     stranger = make_user("stranger@test.com", first_name="Sam")
     theirs = make_entity(stranger, name="Their Shop")
     assert _get(client, theirs, books.owner, **_range()).status_code == 403
+
+
+def test_a_renamed_or_merged_account_shows_as_the_chart_has_it_now(client, books):
+    """The user's rule (2026-11-24): published days too, the account's code and name now - a merged
+    one's kept account - and the supplier's name now; the description falls back to the name now."""
+    entity = books.entity
+    tape = AccountInfo.objects.get(entity_id=entity.id, name="Tape")
+    kept = AccountInfo.objects.create(id=uuid.uuid4(), entity_id=entity.id, type="EXPENSE", name="Stationery",
+                                      xero_code="446", status="ACTIVE")
+    AccountInfo.objects.filter(id=tape.id).update(merged_into_id=kept.id, record_status="archived")
+    XeroContactSync.objects.filter(entity_id=entity.id, name="ABC Supplies").update(name="ABC Supplies Ltd")
+    ReportExpense.objects.filter(account_id=tape.id).update(description="")
+
+    table = _table(_get(client, entity, books.owner, **_range(2, 0)))
+
+    tape_row = next(r for r in table if r[1] == "Expense" and r[2] == "446")
+    assert tape_row[2:6] == ["446", "Stationery", "ABC Supplies Ltd", "Stationery"]

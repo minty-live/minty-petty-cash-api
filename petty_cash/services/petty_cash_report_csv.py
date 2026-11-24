@@ -30,9 +30,10 @@ from __future__ import annotations
 from decimal import Decimal
 
 from minty_db.enums import DiscrepancyType
-from minty_db.models import AccountInfo, ReportExpense, ReportSale, SaleInfo, XeroContactSync
+from minty_db.models import ReportExpense, ReportSale, SaleInfo
 
 from petty_cash.money import cents
+from petty_cash.services import chart_view
 from petty_cash.services.report_csv import to_csv as _to_csv
 from petty_cash.services.sales import CASH_VALUE_NAME, sales_methods
 
@@ -70,22 +71,20 @@ def _difference(report) -> Decimal:
 
 
 def _lines(report_ids) -> dict[str, list]:
-    """Each report's expense lines as entered, each with ``account_pair`` (code, name) and
-    ``contact_name`` - the stored rows, else what was last published."""
+    """Each report's expense lines as entered, each with ``account_pair`` (code, name), ``item_name``
+    and ``contact_name`` - the chart's now, a merged account's kept one (the user's rule, 2026-11-24;
+    what was published, ``published_*``, is never shown)."""
     out: dict[str, list] = {}
     if not report_ids:
         return out
     rows = list(ReportExpense.objects.filter(report_id__in=report_ids).order_by("created_at", "id"))
-    account_ids = {r.account_id for r in rows if r.account_id}
-    contact_ids = {r.contact_id for r in rows if r.contact_id}
-    accounts = {a.id: ((a.xero_code or a.code or "").strip(), (a.name or "").strip())
-                for a in AccountInfo.objects.filter(id__in=account_ids)} if account_ids else {}
-    contacts = {c.id: (c.name or "").strip()
-                for c in XeroContactSync.objects.filter(id__in=contact_ids)} if contact_ids else {}
+    accounts = chart_view.accounts(r.account_id for r in rows)
+    contacts = chart_view.contacts(r.contact_id for r in rows)
     for line in rows:
-        line.account_pair = accounts.get(line.account_id) or (
-            (line.published_account_code or "").strip(), (line.published_account_name or "").strip())
-        line.contact_name = contacts.get(line.contact_id) or (line.published_contact_name or "").strip()
+        view = accounts.get(line.account_id) if line.account_id else None
+        line.account_pair = (view.code, view.name) if view is not None else ("", "")
+        line.item_name = chart_view.item_name(line, accounts)
+        line.contact_name = chart_view.contact_name(line, contacts)
         out.setdefault(str(line.report_id), []).append(line)
     return out
 
@@ -150,7 +149,7 @@ def rows(entity_id, reports, currency: str | None) -> list[list[str]]:
         for line in lines.get(str(report.id), []):
             words = (line.description or "").strip()
             if words in _EMPTY_DESCRIPTIONS:
-                words = (line.item or "").strip() or EXPENSE_LINE
+                words = line.item_name or EXPENSE_LINE
             code_, name = line.account_pair
             out.append([day, EXPENSE_LINE, code_, name, line.contact_name, words,
                         _money(-(line.amount or 0)), "", "", "", "", "", "", "", "", code])

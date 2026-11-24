@@ -141,6 +141,30 @@ def test_the_page_brings_the_lines_and_what_a_line_may_use(client, shop, lists, 
     assert body["permissions"] == {"create_supplier": True}
 
 
+def test_a_line_shows_its_account_and_supplier_as_the_chart_has_them_now(client, shop, lists, s3):
+    """The user's rule (2026-11-24): a renamed account and supplier show their names now; a line on an
+    account merged away shows the kept one; the saved ``item`` only for a line with no account."""
+    from petty_cash.routes.expenses import lines_payload
+    from petty_cash.services.report_page import _expense_lines
+
+    draft = _draft(shop)
+    line, _ = _line(shop, draft, s3)
+    kept = AccountInfo.objects.create(entity_id=shop.entity.id, xero_account_id="acc-0009", xero_code="401",
+                                      name="Marketing", type="EXPENSE", status="ACTIVE")
+    AccountInfo.objects.filter(xero_account_id="acc-0001").update(merged_into_id=kept.id, record_status="archived")
+    XeroContactSync.objects.filter(xero_contact_id="con-0001").update(name="ABC Supplies Ltd")
+    bare = ReportExpense.objects.create(report_id=draft.id, item="Old words", amount=Decimal("1"), description="")
+
+    payload = {p["id"]: p for p in lines_payload(ReportExpense.objects.filter(report_id=draft.id))}
+    assert payload[str(line.id)]["item"] == "Marketing"
+    assert payload[str(line.id)]["account"] == {"id": "acc-0009", "code": "401", "name": "Marketing"}
+    assert payload[str(line.id)]["supplier"] == {"id": "con-0001", "name": "ABC Supplies Ltd"}
+    assert (payload[str(bare.id)]["item"], payload[str(bare.id)]["account"]) == ("Old words", None)
+
+    close = {e["id"]: e for e in _expense_lines(draft.id)}
+    assert (close[str(line.id)]["item"], close[str(line.id)]["contact_name"]) == ("Marketing", "ABC Supplies Ltd")
+
+
 @pytest.mark.parametrize(("switch", "enabled"), [(True, True), (False, False), (None, False)])
 def test_the_page_says_whether_the_receipt_reader_is_on(client, shop, lists, ai_policy, switch, enabled):
     """The app offers "Read with AI" only when ``ai_policy.receipt_reader_on`` is on (owner, 2026-11-20;

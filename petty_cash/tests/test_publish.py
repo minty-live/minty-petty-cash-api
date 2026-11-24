@@ -422,8 +422,10 @@ def test_a_whole_day_goes_into_xero_and_the_report_reads_published(mapped, xero)
 
 @pytest.mark.parametrize("description", ["", None, "   ", "No description", "-"])
 def test_a_line_with_no_description_goes_into_xero_under_its_account_name(mapped, xero, description):
+    """Its account's name NOW (the user's rule, 2026-11-24): renamed since the line was saved, the new one."""
     report = _report(mapped, expense_total=10)
-    line = _line(mapped, report, "Staff Welfare", 10)
+    line = _line(mapped, report, "Staff Meals", 10)
+    AccountInfo.objects.filter(id=line.account_id).update(name="Staff Welfare")
     ReportExpense.objects.filter(id=line.id).update(description=description)
     Report.objects.filter(id=report.id).update(publishing_status="publishing")
 
@@ -509,7 +511,8 @@ def test_a_refused_line_fails_the_publish_with_its_reason_and_the_rest_is_record
 
     assert (report.publishing_status, report.xero_integrated) == ("failed", False)
     items = json.loads(ReportHistory.objects.get(report_id=report.id, action="publish_failed").new_value)
-    assert items == [{"text": "Expense 'Taxi' — contact is archived in Xero", "scope": "expense",
+    # the line's account as the chart names it now (the user's rule, 2026-11-24), not its saved item
+    assert items == [{"text": "Expense 'Account 429' — contact is archived in Xero", "scope": "expense",
                       "expense_id": str(second.id), "deps": [], "failed_contact_id": "con-sup",
                       "module": "expenses"}]
     assert set(publish_record.load_record(report.id)["objects"]["expenses"]) == {str(first.id)}

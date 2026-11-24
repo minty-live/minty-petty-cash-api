@@ -102,7 +102,8 @@ def test_a_reconciled_entry_blocks_the_delete_and_nothing_is_touched(client, map
     assert resp.status_code == 409
     assert resp.json() == {"error": KEPT, "reasons": [
         "Cash sales invoice: it has a payment in Xero. Remove the payment in Xero first.",
-        f"Expense Coffee, {_money(mapped, '10.00')}: it's reconciled in Xero. Unreconcile it in Xero first.",
+        # the line's account as the chart names it now (the user's rule, 2026-11-24), not its saved item
+        f"Expense Account 429, {_money(mapped, '10.00')}: it's reconciled in Xero. Unreconcile it in Xero first.",
     ]}
     assert _writes(org) == []
     row = Report.objects.get(id=report.id)
