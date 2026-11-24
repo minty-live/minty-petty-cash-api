@@ -235,6 +235,12 @@ until then they were asked of Flask's `POST /api/internal/xero/publish-reasons`.
 - **An account gone from Xero (A3)**: `stale_matches`' sentence is the doc's - "<name> (<code>) is archived
   in Xero. Please check it in Xero, then map this account to the one you want to use (Settings, under
   General), and publish again."
+- **An account with no Xero code** (the user, 2026-11-24: never a silent account): an expense line whose
+  account has no `xero_code` (none yet, or one longer than Xero's 10 - a name in Xero's code field) is
+  refused with its reason (`steps.NO_XERO_CODE`: "<name> has no Xero code yet. Match it to a Xero account
+  in Settings, then publish again."; a line with no account, `NO_ACCOUNT`); the day's other lines go.
+  Until then it went to Xero as account `200` without a word. An account keeps its Minty code (`code`)
+  beside its Xero code (`xero_code`) since minty-db v0.18; publishing always sends the Xero code.
 - **One contact list (C3)**: Petty Cash Settings' contact options are named by `public_id` (Xero id, else
   the row's own), so a live company also sees the contacts made in Minty (they go to Xero at their first
   publish); merged-away and archived ones are never offered; the save resolves either id.

@@ -67,6 +67,10 @@ def _amount(value) -> float:
 CONTACT_NOT_IN_XERO = "Xero couldn't find or add the contact {name}, please try again"
 #: Never a silent currency: an entry without one is booked in Xero's own (2026-11-24).
 NO_CURRENCY = "the company's currency is not chosen"
+#: Never a silent account (the user, 2026-11-24): a line once went to Xero as account 200 when its
+#: account had no Xero code (none yet, or a name in Xero's code field - longer than Xero's 10).
+NO_XERO_CODE = "{name} has no Xero code yet. Match it to a Xero account in Settings, then publish again."
+NO_ACCOUNT = "this expense has no account. Choose one, then publish again."
 
 
 def _module_error(run: Run, label: str, reason: str, meta: dict | None = None) -> None:
@@ -384,12 +388,17 @@ def expenses(run: Run, report: Report, existing: dict, only_ids=None) -> tuple[i
             if contact and xero_contact is None:
                 _module_error(run, label, CONTACT_NOT_IN_XERO.format(name=contact.name), meta)
                 continue
+            code = str((line.account.xero_code if line.account else None) or "").strip()
+            if not code or len(code) > 10:
+                _module_error(run, label, NO_XERO_CODE.format(name=line.account.name) if line.account
+                              else NO_ACCOUNT, meta)
+                continue
             try:
                 made = bank_transaction(
                     run, report.transaction_date, kind="SPEND", purpose="expense", contact_id=xero_contact,
                     bank_account_id=petty,
                     line_items=[{"description": _line_description(line), "unitAmount": _amount(line.amount),
-                                 "accountCode": (line.account.xero_code if line.account else None) or "200",
+                                 "accountCode": code,
                                  "taxType": "NONE"}],
                     label=label, meta=meta, existing_id=(existing or {}).get(str(line.id)), line=line,
                     # The name a lost supplier is made again under: the synced name, else the item.

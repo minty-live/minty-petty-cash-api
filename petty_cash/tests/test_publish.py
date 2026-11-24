@@ -1034,3 +1034,22 @@ def test_mapping_a_contact_now_relinks_it_through_accounts_api(client, mapped, m
     resp = link({"xero_contact_id": "x-a"})
     assert (resp.status_code, resp.json()["message"]) == (200, "Kee Wah now uses Alpha Ltd in Xero.")
     assert asked == [(mapped.entity.id, kee.id, "x-a", "user", mapped.owner.id)]
+
+
+def test_a_line_whose_account_has_no_xero_code_is_refused_never_sent_as_200(mapped, xero):
+    """Fail loudly (the user, 2026-11-24): an account with no Xero code (none yet, or a name in Xero's
+    code field) used to go to Xero as account 200 without a word. The line is refused with its reason;
+    the others go."""
+    report = _report(mapped, expense_total=30)
+    good = _line(mapped, report, "Coffee", 10)
+    bad = _line(mapped, report, "Taxi", 20, code="471")
+    AccountInfo.objects.filter(id=bad.account_id).update(xero_code=None, code="6100", name="Taxi Fares")
+    report = _run(mapped, report)
+
+    assert report.publishing_status == "failed"
+    sent = [b["bankTransactions"][0]["lineItems"][0] for b in xero.sent("POST", "BankTransactions")]
+    assert [li["accountCode"] for li in sent] == ["429"], "never a silent 200"
+    items = json.loads(ReportHistory.objects.get(report_id=report.id, action="publish_failed").new_value)
+    assert [(i["text"], i["expense_id"]) for i in items] == [
+        ("Expense 'Taxi Fares' — " + steps.NO_XERO_CODE.format(name="Taxi Fares"), str(bad.id))]
+    assert set(publish_record.load_record(report.id)["objects"]["expenses"]) == {str(good.id)}
