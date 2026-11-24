@@ -207,7 +207,7 @@ def test_one_log_line_with_numbers_and_never_the_values(client, shop, model, cap
 
 @pytest.mark.parametrize("receipt, message", [
     (None, "Attach the receipt to read it."),
-    (b"GIF89a-not-allowed", "Attach a PDF, JPEG or PNG file."),
+    (b"GIF89a-not-allowed", "Attach a PDF, JPEG, PNG or HEIC file."),
     (b"", "That file is empty. Attach the receipt again."),
     (b"%PDF" + b"0" * (10 * 1024 * 1024), "Attach a file of 10 MB or less."),
 ], ids=["missing", "gif", "empty", "too-big"])

@@ -186,7 +186,8 @@ def reader_status(entity_id) -> dict:
 
 def read_receipt(entity_id, user_id, data: bytes, mime: str, report_date: date | None = None) -> dict:
     """``{suggestions, reason, reader}`` for a receipt the route has checked (who asks, one
-    PDF/JPEG/PNG by its bytes, at most 10 MB). ``suggestions`` is null on every failure; every
+    PDF/JPEG/PNG/HEIC by its bytes, at most 10 MB; a HEIC reaches the model as JPEG through
+    ``prepare_for_model``). ``suggestions`` is null on every failure; every
     outcome is the caller's 200. ``reader`` is the allowance after this read, so the page's count
     moves without another call. A read is reserved before the model is called and counts only if
     a model answered (``ai_allowance``); a refusal before that point uses nothing. A receipt in

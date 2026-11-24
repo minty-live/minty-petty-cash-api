@@ -5,7 +5,8 @@
 - ``POST /reports/expenses/lines`` (multipart): ``transaction_date, amount, description, supplier_id,
   account_id`` and one ``receipt`` - every field checked here: an amount above 0 and up to the
   maximum, a supplier and an account from the lists above, a description of at most 300
-  characters, one PDF / JPEG / PNG of at most 10 MB judged by its bytes. Instead of ``supplier_id``
+  characters, one PDF / JPEG / PNG / HEIC of at most 10 MB judged by its bytes (a HEIC must open;
+  it is stored as it is, the user 2026-11-24). Instead of ``supplier_id``
   it takes the receipt reader's ``new_supplier_token`` (the user, 2026-11-23): the supplier the
   reader read and the company does not have is added once every other check passes, as
   ``POST /suppliers`` adds one but by anyone who may add a line; a token altered, for another company
@@ -20,6 +21,8 @@
   2026-11-19); adding or changing a line takes those six details back (``fx.COLUMNS``), checked
   against its amount by ``fx.saved_exchange`` - all or none, else 422.
 - ``GET /expense-lines/{id}/receipts/{attachment id}``: the receipt's bytes - by id, never by key.
+  ``?as=jpeg`` turns a HEIC into an upright JPEG on the fly (for a browser that can't draw HEIC;
+  the user, 2026-11-24) - nothing is stored; any other receipt comes back exactly as it is.
 - ``PUT /reports/expenses`` ``{transaction_date, action, edit_version}``: the step's Save & Next /
   Save & Exit. A Save & Next opened from an older ``edit_version`` is 409 ``{error: "This step was
   already saved by {name} at {time}", saved, next: "deposit"}`` (owner's decisions doc R2,
@@ -31,6 +34,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from decimal import Decimal, InvalidOperation
@@ -45,7 +49,7 @@ from minty_db.models import (
     ReportExpenseAttachment,
     XeroContactSync,
 )
-from minty_shared import ai, fx
+from minty_shared import ai, fx, images
 from ninja import Router
 
 from core.exceptions import Refused
@@ -95,6 +99,7 @@ from petty_cash.services.suppliers import MAX_NAME as MAX_SUPPLIER_NAME
 from petty_cash.services.suppliers import SupplierRefused, create_supplier
 
 router = Router()
+logger = logging.getLogger("petty-cash-api")
 
 NO_DRAFT = "I don't see a draft yet - let's start with the opening entry."
 NOT_FOUND = "Hmm, I couldn't find that expense."
@@ -392,7 +397,15 @@ def expense_receipt(request, line_id: str, attachment_id: str):
     body = read_receipt(attachment.file_path, settings.MAX_RECEIPT_BYTES)
     if len(body) > settings.MAX_RECEIPT_BYTES:
         raise Refused("That file is too big to show here.", 413)
-    resp = HttpResponse(body, content_type=sniff_mime(body[:16]) or attachment.mime_type or "application/octet-stream")
+    mime = sniff_mime(body[:16]) or attachment.mime_type or "application/octet-stream"
+    if request.GET.get("as") == "jpeg" and images.is_heif(mime):
+        # a browser that can't draw HEIC asks for a JPEG, made now and never stored (the user, 2026-11-24)
+        try:
+            body, mime = images.to_jpeg(body), images.JPEG
+        except images.ImageError as exc:
+            logger.error("Receipt %s (HEIC) could not be made a JPEG to show: %s", attachment.id, exc)
+            raise Refused("This photo can't be shown here.", 422) from None
+    resp = HttpResponse(body, content_type=mime)
     resp["Content-Disposition"] = "inline"
     resp["X-Content-Type-Options"] = "nosniff"
     return resp

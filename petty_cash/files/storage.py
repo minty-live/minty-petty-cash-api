@@ -18,13 +18,14 @@ from functools import lru_cache
 from botocore.exceptions import ClientError
 from django.conf import settings
 from minty_db.models import Attachment
+from minty_shared import images
 from minty_shared.storage import make_client, put_file
 
 from petty_cash.files.receipt_keys import safe_extension, safe_stem
 
 logger = logging.getLogger("petty-cash-api")
 
-#: The magic bytes of the three file types a receipt may be (Flask's ``expense_ai._MAGIC``): the
+#: The magic bytes of the file types a receipt may be (Flask's ``expense_ai._MAGIC``): the
 #: declared extension and the browser's content type are not evidence.
 _MAGIC = (
     (b"%PDF", "application/pdf"),
@@ -37,7 +38,9 @@ def sniff_mime(data: bytes) -> str | None:
     for magic, mime in _MAGIC:
         if data.startswith(magic):
             return mime
-    return None
+    # an iPhone photo kept as HEIC (the user, 2026-11-24): stored as it is; shown or published as
+    # JPEG only where HEIC can't be used (minty_shared.images)
+    return images.sniff_heif(data)
 
 
 @lru_cache(maxsize=1)

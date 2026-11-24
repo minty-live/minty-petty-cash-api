@@ -4,6 +4,10 @@
 Republishing runs every step again, so the order is: leave the receipt alone when Xero already
 holds exactly it (one file, same name and size); otherwise attach the new file and only then
 delete the old ones, so a failed upload never leaves the transaction with none.
+
+Xero takes no HEIC: an iPhone photo kept as HEIC is sent as ``<name>.jpg``, made on the fly
+(``minty_shared.images.for_xero``; the user, 2026-11-24). The same photo always makes the same
+JPEG, so a republish still sees Xero's file as unchanged. Every other receipt goes as it is.
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ import mimetypes
 
 import requests
 from minty_db.models import Attachment, ReportExpenseAttachment
+from minty_shared import images
 
 from petty_cash.files import storage
 from petty_cash.files.receipt_keys import safe_stem
@@ -125,11 +130,18 @@ def attach_receipt(run, line, transaction_id: str) -> bool:
     except Exception as exc:  # the bucket's own errors are many; the transaction stands
         logger.error("Publish: could not read receipt %s from the bucket: %s", key, exc)
         return False
+    try:
+        # Xero takes no HEIC: an iPhone photo goes as <name>.jpg, made now (the user, 2026-11-24)
+        data, content_type, name = images.for_xero(
+            data, mimetypes.guess_type(name)[0] or "application/octet-stream", name)
+    except images.ImageError as exc:
+        logger.error("Publish: receipt %s (HEIC) could not be made a JPEG for Xero: %s", key, exc)
+        return False
     existing = _associations(run, transaction_id)
     if existing is not None and _already_attached(existing, name, data):
         logger.info("Publish: the receipt on %s is unchanged", transaction_id)
         return True
-    file_id = _upload(run, name, data, mimetypes.guess_type(name)[0] or "application/octet-stream")
+    file_id = _upload(run, name, data, content_type)
     if not file_id or not _associate(run, file_id, transaction_id):
         return False
     _delete(run, [a["FileId"] for a in (existing or []) if a["FileId"] != file_id])

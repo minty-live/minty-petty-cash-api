@@ -15,7 +15,8 @@ def split_receipt_keys(value: str | None) -> list[str]:
     return [k.strip() for k in _KEY_BOUNDARY.split(value) if k.strip()]
 
 
-_SAFE_EXTENSIONS = {"jpg", "jpeg", "png", "gif", "webp", "pdf"}
+#: heic/heif: an iPhone photo is kept as HEIC under its own extension (the user, 2026-11-24).
+_SAFE_EXTENSIONS = {"jpg", "jpeg", "png", "gif", "webp", "pdf", "heic", "heif"}
 _STEM_MAX = 80
 
 

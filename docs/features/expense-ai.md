@@ -18,8 +18,9 @@ shares with minty-payment-request-api's invoice reader. The answer to the web is
   the call, with the company's AI allowance left - below): the app offers "Read receipt" only
   when it is on. Switched off it is `{"enabled": false}` alone.
 - `POST /reports/expenses/extract` (`petty_cash/routes/expenses.py::extract_expense`) - who may
-  ask (`require_edit`, 403) and the file (one PDF / JPEG / PNG of at most 10 MB by its bytes,
-  `services/expenses.py::checked_receipt`, 422) are refused with the Expenses step's sentences.
+  ask (`require_edit`, 403) and the file (one PDF / JPEG / PNG / HEIC of at most 10 MB by its
+  bytes - a HEIC must open, `services/expenses.py::checked_receipt`, 422) are refused with the
+  Expenses step's sentences.
   Past those every outcome is 200 `{suggestions, reason, reader}`; `suggestions` is null on any
   failure (and on `limit_reached`) and the app shows nothing.
 - `petty_cash/services/receipt_reader.py` - the receipt's half: the company's lists (`build_context`:
@@ -31,7 +32,8 @@ shares with minty-payment-request-api's invoice reader. The answer to the web is
   failover, the call and its one retry, usage and cost, and the ONE log line (numbers only, never a
   value read off a receipt; `model=` is the model that answered, `attempts=` the chain). `minty_shared.model_input` makes the small copy the model reads (an
   image capped at 2048 px and saved once as JPEG; a PDF whole, every page - minty-shared v0.16, the
-  user 2026-11-24; the 10 MB limit stays). The stored receipt is never
+  user 2026-11-24; the 10 MB limit stays; an iPhone HEIC is decoded through `minty_shared.images`
+  and sent as JPEG like any photo - minty-shared v0.19). The stored receipt is never
   changed: it reaches B2 exactly as uploaded.
 - `python manage.py expense_ai_check` - one round-trip call with a generated image, from wherever
   the code runs, to prove the configuration (the policy's models, which one answered).

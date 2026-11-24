@@ -284,7 +284,7 @@ def test_two_lines_alike_keep_their_own_receipts(client, shop, lists, s3):
     ({"supplier_id": ""}, "Choose a supplier from the list."),
     ({"account_id": "acc-0002"}, "Choose an account code from the list."),  # switched off
     ({"receipt": None}, "Attach the receipt to add this expense."),
-    ({"receipt": b"GIF89a-not-allowed"}, "Attach a PDF, JPEG or PNG file."),
+    ({"receipt": b"GIF89a-not-allowed"}, "Attach a PDF, JPEG, PNG or HEIC file."),
     ({"receipt": b""}, "That file is empty. Attach the receipt again."),
     ({"receipt": b"%PDF" + b"0" * (10 * 1024 * 1024)}, "Attach a file of 10 MB or less."),
     ({"transaction_date": "14/10/2026"}, "That date doesn't look quite right!"),
@@ -530,7 +530,7 @@ def test_a_receipt_can_be_removed_but_never_the_last_one(client, shop, lists, s3
     ({"description": "x" * 301}, "Keep the description to 300 characters or fewer."),
     ({"supplier_id": "con-unknown"}, "Choose a supplier from the list."),
     ({"account_id": "acc-0002"}, "Choose an account code from the list."),  # switched off
-    ({"receipt": b"GIF89a-not-allowed"}, "Attach a PDF, JPEG or PNG file."),
+    ({"receipt": b"GIF89a-not-allowed"}, "Attach a PDF, JPEG, PNG or HEIC file."),
     ({"receipt": b""}, "That file is empty. Attach the receipt again."),
     ({"receipt": b"%PDF" + b"0" * (10 * 1024 * 1024)}, "Attach a file of 10 MB or less."),
 ], ids=["zero", "negative", "empty", "words", "too-much", "description", "supplier", "account", "gif", "no-bytes",

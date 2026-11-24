@@ -321,7 +321,7 @@ def test_fixed_an_account_or_supplier_must_be_the_company_s(client, shop, day, f
 
 
 @pytest.mark.parametrize("body, message", [
-    (b"just text", "Attach a PDF, JPEG or PNG file."),
+    (b"just text", "Attach a PDF, JPEG, PNG or HEIC file."),
     (b"", "That file is empty. Attach the receipt again."),
 ])
 def test_fixed_a_new_receipt_is_checked_as_the_expenses_step_checks_it(client, shop, day, s3, body, message):  # noqa: F811

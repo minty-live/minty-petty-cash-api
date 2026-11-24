@@ -33,7 +33,7 @@ from minty_db.models import (
     ReportExpenseAttachment,
     XeroContactSync,
 )
-from minty_shared import fx
+from minty_shared import fx, images
 
 from petty_cash.files import storage
 from petty_cash.money import cents
@@ -50,6 +50,7 @@ from petty_cash.services.sales import cash_sales_from_detail
 logger = logging.getLogger("petty-cash-api")
 
 NOT_A_DRAFT = "This report isn't a draft anymore, so I can't change its expenses."
+PHOTO_WONT_OPEN = "This photo can't be opened. Attach it again as a JPEG or PNG."
 
 
 class ExpenseRefused(Exception):
@@ -69,7 +70,14 @@ def checked_receipt(upload) -> tuple[bytes, str, str]:
     data = upload.read()
     mime = storage.sniff_mime(data[:16])
     if mime is None:
-        raise ExpenseRefused("Attach a PDF, JPEG or PNG file.")
+        raise ExpenseRefused("Attach a PDF, JPEG, PNG or HEIC file.")
+    if images.is_heif(mime):
+        # kept as HEIC (the user, 2026-11-24), so it must open: it is made JPEG later to show or publish
+        try:
+            images.check_decodes(data)
+        except images.ImageError as exc:
+            logger.warning("A HEIC receipt that won't open was refused (%s bytes): %s", len(data), exc)
+            raise ExpenseRefused(PHOTO_WONT_OPEN) from None
     return data, mime, upload.name
 
 
