@@ -124,6 +124,18 @@ notation. minty-shared-py v0.15:
   `ai.evidence_refusal` decides, after the read and before any rate is asked. Either refusal
   still counts as a read: a model answered.
 
+## What the file may be instead (the user, 2026-11-24)
+
+A warning, never a refusal: shop managers sometimes attach a bank payment confirmation, an
+unrelated photo or an unreadable picture. minty-shared-py v0.18 asks for `document_type` (receipt,
+invoice, bank_payment_confirmation, other or unreadable), and every answered read - refused ones
+included - carries `document_warning`: `bank_payment_confirmation`, `other` or `unreadable`, else
+null (`ai.document_warning`; a receipt and an invoice are both fine). The suggestions still fill;
+the page shows the warning and saving goes on as before. It costs no second call (same read, same
+allowance), and like every read it happens only when the person presses Read. The free photo
+check (blurry, dark, small - no AI) is the web's, on every photo attached (`@minty/shared`'s
+`photoQuality`).
+
 ## The supplier (the user, 2026-11-23)
 
 The prompt (minty-shared-py v0.14) asks for the same **or a similar** supplier from the list

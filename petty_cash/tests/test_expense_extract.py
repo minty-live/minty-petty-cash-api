@@ -382,6 +382,36 @@ def test_a_refused_read_still_counts(client, shop, model):
     assert row.status == "ok"
 
 
+# --- what the file may be instead (the user, 2026-11-24): a warning, never a refusal -----------
+
+
+def test_a_bank_payment_confirmation_still_fills_and_carries_the_warning(client, shop, model):
+    model.answer = FakeResponse(_reply(document_type="bank_payment_confirmation"))
+    body = _extract(client, shop).json()
+    assert body["document_warning"] == "bank_payment_confirmation"
+    assert body["reason"] is None and body["suggestions"]["amount"]["applied"] is True
+    assert "document_type" not in body["suggestions"]
+
+
+@pytest.mark.parametrize("kind", ["receipt", "invoice", "", "a selfie"])
+def test_a_receipt_an_invoice_or_an_unknown_type_warns_of_nothing(client, shop, model, kind):
+    model.answer = FakeResponse(_reply(document_type=kind))
+    assert _extract(client, shop).json()["document_warning"] is None
+
+
+def test_the_warning_travels_on_a_refused_read_too(client, shop, model):
+    model.answer = FakeResponse(_reply(description="", document_type="other"))
+    body = _extract(client, shop).json()
+    assert (body["suggestions"], body["reason"], body["document_warning"]) == (
+        None, "no_description", "other",
+    )
+
+
+def test_a_read_that_never_answered_has_no_warning(client, shop, model):
+    model.answer = FakeResponse("{not json")
+    assert _extract(client, shop).json().get("document_warning") is None
+
+
 def test_the_instruction_is_the_owners_simple_prompt(shop):
     instruction, prefix, aliases = receipt_reader.prompt(receipt_reader.build_context(shop.entity.id))
     assert instruction == ai_prompt.instruction("receipt")

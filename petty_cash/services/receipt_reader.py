@@ -157,6 +157,7 @@ def validate(parsed: Reading, context: dict, aliases: ai_prompt.Aliases) -> dict
         "currency": currency,
         "entity_currency": context["entity"]["currency"],
         "document_count": parsed.document_count,
+        "document_type": parsed.document_type,
     }
 
 
@@ -221,7 +222,11 @@ def read_receipt(entity_id, user_id, data: bytes, mime: str, report_date: date |
         ai_allowance.finish(read_id, result)
     ai.log_read(config, result, entity_id=entity_id, user_id=user_id)
     answer = result.answer()
-    refusal = ai.evidence_refusal(answer["suggestions"]) if answer["suggestions"] else None
+    # what the file may be instead of a receipt (the user, 2026-11-24): a warning beside whatever
+    # fills, refused reads included - never a refusal of its own
+    suggestions = answer["suggestions"]
+    warning = ai.document_warning(suggestions.pop("document_type", None)) if suggestions else None
+    refusal = ai.evidence_refusal(suggestions) if suggestions else None
     if refusal:
         # several receipts in the file, or nothing describes what was paid for (owner, 2026-11-23):
         # nothing is filled and the page says why; the read still counts (a model answered)
@@ -235,7 +240,8 @@ def read_receipt(entity_id, user_id, data: bytes, mime: str, report_date: date |
             answer["suggestions"], report_date=report_date or now, today=now, places=2, max_amount=_MAX_AMOUNT,
             fetch=fx.frankfurter_rate,
         )
-    return {**answer, "reader": {"enabled": True, **ai_allowance.status(entity_id, policy).as_dict()}}
+    return {**answer, "document_warning": warning,
+            "reader": {"enabled": True, **ai_allowance.status(entity_id, policy).as_dict()}}
 
 
 def _no_read(reason: str, entity_id, policy: ai_allowance.Policy) -> dict:
