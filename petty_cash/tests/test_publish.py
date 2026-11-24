@@ -95,6 +95,9 @@ class FakeXero:
             return answer
         if method == "GET" and path == "connections":
             return _Response(200, [{"tenantId": ORG}])
+        if method == "GET" and path == "Organisation":
+            return _Response(200, {"Organisations": [{"OrganisationID": ORG, "Name": "Acme Ltd",
+                                                      "BaseCurrency": "HKD"}]})
         if method == "GET" and path.startswith("Associations/"):
             files = self.attached.get(path.split("/", 1)[1])
             return _Response(200, files) if files else _Response(404, [])
@@ -251,6 +254,34 @@ def test_the_start_locks_the_report_and_starts_the_worker(client, mapped, xero, 
     assert Report.objects.get(id=report.id).publishing_status == "publishing"
     assert [tuple(str(a) for a in args) for args in threads] == [
         (str(mapped.entity.id), str(report.id), str(mapped.owner.id), "unpublished")]
+    assert ("GET", "Organisation", None) in xero.calls  # the currencies are compared first
+
+
+def test_a_xero_organisation_in_another_currency_is_refused_before_anything_is_sent(client, mapped, xero, threads):
+    """Minty's currency and the organisation's base currency differ (2026-11-24): nothing goes to
+    Xero, and the sentence says what to change - Xero can't change its base currency."""
+    xero.answers[("GET", "Organisation")] = _Response(200, {"Organisations": [
+        {"OrganisationID": ORG, "Name": "Acme Ltd", "BaseCurrency": "USD"}]})
+    report, *_ = _full_day(mapped)
+
+    resp = _publish(client, mapped, report.id)
+
+    assert resp.status_code == 409
+    assert resp.json() == {"error": "Xero uses USD for Acme Ltd, but this company uses HKD in Minty, so nothing was "
+                                    "sent. Disconnect Xero in Settings, change the company's currency to USD, then "
+                                    "connect again."}
+    assert threads == [] and Report.objects.get(id=report.id).publishing_status != "publishing"
+    assert [(m, p) for m, p, _ in xero.calls if m != "GET"] == []
+
+
+@pytest.mark.parametrize("answer", [requests.ConnectionError("down"), _Response(500, {"Message": "busy"}),
+                                    _Response(200, {"Organisations": [{"Name": "Acme Ltd"}]})])
+def test_an_organisation_xero_cant_tell_the_currency_of_still_publishes(client, mapped, xero, threads, answer):
+    """The read failing only logs: every entry carries the company's currency, so Xero itself refuses
+    a currency its organisation doesn't use."""
+    xero.answers[("GET", "Organisation")] = answer
+    report, *_ = _full_day(mapped)
+    assert _publish(client, mapped, report.id).status_code == 202
 
 
 def test_a_failed_publish_starts_again_knowing_it_failed(client, mapped, xero, threads):
@@ -359,6 +390,7 @@ def test_a_whole_day_goes_into_xero_and_the_report_reads_published(mapped, xero)
 
     invoice, = xero.sent("PUT", "Invoices")
     assert invoice["Invoices"][0]["Contact"] == {"ContactID": "con-cash"}
+    assert invoice["Invoices"][0]["CurrencyCode"] == "HKD"
     assert invoice["Invoices"][0]["LineItems"] == [{"Description": f"MT{D3:%Y%m%d}Cash Sales", "Quantity": 1,
                                                     "UnitAmount": 200.0, "AccountCode": "200", "TaxType": "NONE",
                                                     "LineAmount": 200.0}]
@@ -368,10 +400,11 @@ def test_a_whole_day_goes_into_xero_and_the_report_reads_published(mapped, xero)
     coffee, taxi, short = by_item["Coffee receipt"], by_item["Taxi receipt"], by_item["Short by 5"]
     assert coffee["bankTransactions"][0] == {
         "type": "SPEND", "Date": D3.isoformat(), "bankAccount": {"accountID": "acc-091"},
-        "Reference": f"MT{D3:%Y%m%d}Expense", "contact": {"contactID": "con-sup"},
+        "Reference": f"MT{D3:%Y%m%d}Expense", "contact": {"contactID": "con-sup"}, "currencyCode": "HKD",
         "lineItems": [{"description": "Coffee receipt", "unitAmount": 10.0, "accountCode": "429", "taxType": "NONE"}]}
     assert taxi["bankTransactions"][0]["lineItems"][0]["unitAmount"] == 20.0
     assert short["bankTransactions"][0]["type"] == "SPEND"
+    assert short["bankTransactions"][0]["currencyCode"] == "HKD"
     assert short["bankTransactions"][0]["Reference"] == f"MT{D3:%Y%m%d}Discrepancy"
     assert short["bankTransactions"][0]["lineItems"] == [{"description": "Short by 5", "unitAmount": 5.0,
                                                            "accountCode": "420", "taxType": "NONE"}]
@@ -424,12 +457,36 @@ def test_the_transfers_are_in_the_companys_currency(mapped, xero):
     assert report.publishing_status == "completed"
 
 
+def test_every_entry_is_in_the_companys_currency(mapped, xero):
+    """Expenses, the counted difference and cash sales name the currency too (2026-11-24): without
+    it Xero books the amount in the bank account's or the organisation's own currency, silently."""
+    sgd = CurrencyInfo.objects.create(id=uuid.uuid4(), currency_code="SGD", currency_name="SGD", symbol="$",
+                                      decimal_places=2)
+    Entity.objects.filter(id=mapped.entity.id).update(currency_id=sgd.id)
+    report, *_ = _full_day(mapped)
+    _run(mapped, report)
+    assert {b["bankTransactions"][0]["currencyCode"] for b in xero.sent("POST", "BankTransactions")} == {"SGD"}
+    assert [b["Invoices"][0]["CurrencyCode"] for b in xero.sent("PUT", "Invoices")] == ["SGD"]
+
+
 def test_no_currency_fails_the_transfers_with_a_reason_never_a_silent_hkd(mapped, xero):
     Entity.objects.filter(id=mapped.entity.id).update(currency_id=None)
     report = _run(mapped, _report(mapped, bank_deposit=150))
     assert report.publishing_status == "failed" and xero.sent("POST", "BankTransfers") == []
     failure = ReportHistory.objects.get(report_id=report.id, action="publish_failed")
     assert [i["text"] for i in json.loads(failure.new_value)] == ["Deposit — the company's currency is not chosen"]
+
+
+def test_no_currency_sends_no_expense_or_sales_either(mapped, xero):
+    Entity.objects.filter(id=mapped.entity.id).update(currency_id=None)
+    report = _report(mapped, cashsale_total=200, expense_total=10)
+    _line(mapped, report, "Coffee", 10)
+    report = _run(mapped, report)
+    assert report.publishing_status == "failed"
+    assert xero.sent("POST", "BankTransactions") == [] and xero.sent("PUT", "Invoices") == []
+    failure = ReportHistory.objects.get(report_id=report.id, action="publish_failed")
+    texts = [i["text"] for i in json.loads(failure.new_value)]
+    assert len(texts) == 2 and all(t.endswith("the company's currency is not chosen") for t in texts)
 
 
 # ---- failures --------------------------------------------------------------------------------
@@ -799,6 +856,16 @@ def test_xero_refusing_an_archived_contact_says_contact_not_account():
     assert translate_xero_error(400, body, subject="account") == "contact is archived in Xero"
     account = json.dumps({"Elements": [{"ValidationErrors": [{"Message": "Account code '260' has been archived"}]}]})
     assert translate_xero_error(400, account, subject="contact") == "account is archived in Xero"
+
+
+@pytest.mark.parametrize("message", ["Organisation is not subscribed to currency SGD",
+                                     "The currency code SGD is not valid for bank account 090"])
+def test_xero_refusing_the_currency_says_what_to_change(message):
+    """A currency refusal names the account too; it must not read as "account is no longer active"."""
+    from petty_cash.xero.errors import XERO_CURRENCY, translate_xero_error
+
+    body = json.dumps({"Elements": [{"ValidationErrors": [{"Message": message}]}]})
+    assert translate_xero_error(400, body, subject="account") == XERO_CURRENCY
 
 
 def test_a_supplier_of_an_older_organisation_is_not_refused(client, mapped, xero, threads):

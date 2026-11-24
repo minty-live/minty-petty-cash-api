@@ -46,6 +46,13 @@ XERO_HAS_PAYMENT = (
     "this entry already has a payment or credit note against it in Xero, so it "
     "cannot be changed. Remove that in Xero, then publish again"
 )
+# Xero refusing the company's currency (2026-11-24): every entry names Minty's currency, and an
+# organisation that doesn't use it refuses. Xero can't change its base currency, so the sentence
+# points at Minty's.
+XERO_CURRENCY = (
+    "Xero doesn't use this company's currency. Disconnect Xero in Settings, change the "
+    "company's currency to your Xero organisation's, then connect again"
+)
 
 
 def _latest_publish_failed_row(histories):
@@ -226,6 +233,9 @@ def translate_xero_error(
         if "account" in lowered or who == "account":
             return "account is archived in Xero"
         return "contact is archived in Xero"
+    # before the account rule: Xero's currency refusals name the bank account and "valid" too
+    if "currency" in lowered:
+        return XERO_CURRENCY
     if "account code" in lowered or ("account" in lowered and "valid" in lowered):
         return "account is no longer active in Xero"
     if "contact" in lowered and (

@@ -302,6 +302,21 @@ def test_a_refused_reversal_is_a_warning_without_xeros_own_words(client, shop, d
     assert len(xero.posted) == 1
 
 
+def test_a_reversal_refused_over_the_currency_says_what_to_change(client, shop, day, xero):
+    """Xero's currency refusal is the one its words are turned into a sentence for (2026-11-24)."""
+    from petty_cash.xero.errors import XERO_CURRENCY
+
+    report, _ = day
+    _published(report)
+    xero.posts = [_Response(400, {"Elements": [{"ValidationErrors": [
+        {"Message": "Organisation is not subscribed to currency HKD"}]}]})]
+
+    body = _post(client, shop).json()
+
+    assert (body["status"], body["xero_status"]) == ("warning", "failed")
+    assert body["message"] == f"Local report updated, but Xero sync failed: {XERO_CURRENCY}"
+
+
 def test_a_refused_replacement_is_a_warning_after_the_reversal(client, shop, day, xero):
     report, _ = day
     _published(report)

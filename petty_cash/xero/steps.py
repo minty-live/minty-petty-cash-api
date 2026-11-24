@@ -8,7 +8,8 @@ made (``publish_record``), so a republish updates it rather than making a second
 
 Differences from Flask, deliberate:
 - every Xero call has a timeout (Flask's transfer and invoice posts had none);
-- transfers carry the company's currency (owner, 2026-11-06), never a fixed HKD;
+- transfers carry the company's currency (owner, 2026-11-06), never a fixed HKD, and so does every
+  other entry (2026-11-24): without it Xero books the amount in its own currency, silently;
 - a line's supplier that Xero lost is replaced for THIS company's lines only;
 - money goes to Xero as the stored 2-place amounts, read exactly.
 """
@@ -64,6 +65,8 @@ def _amount(value) -> float:
 #: A contact Xero couldn't be asked about or refused (owner's decisions doc C1, 2026-11-19): the entry
 #: fails rather than go to Xero without its contact.
 CONTACT_NOT_IN_XERO = "Xero couldn't find or add the contact {name}, please try again"
+#: Never a silent currency: an entry without one is booked in Xero's own (2026-11-24).
+NO_CURRENCY = "the company's currency is not chosen"
 
 
 def _module_error(run: Run, label: str, reason: str, meta: dict | None = None) -> None:
@@ -94,6 +97,10 @@ def bank_transaction(run: Run, day, *, kind: str, purpose: str, contact_id, bank
                      line: ReportExpense | None = None, contact_name: str | None = None):
     """Post (or, with ``existing_id``, update) a bank transaction. Its id (or True) or False.
     ``purpose`` names its reference: ``expense``, ``discrepancy``, else a withdrawal."""
+    if not run.currency:
+        logger.error("Publish: company %s has no currency; %s not posted", run.entity.id, label)
+        _module_error(run, label, NO_CURRENCY, meta)
+        return False
     try:
         if contact_id:
             valid = ensure_contact(run, contact_id, contact_name)
@@ -104,7 +111,8 @@ def bank_transaction(run: Run, day, *, kind: str, purpose: str, contact_id, bank
         stamp = day.strftime("%Y%m%d")
         reference = {"expense": "Expense", "discrepancy": "Discrepancy"}.get(purpose, "Withdrawal")
         transaction = {"type": kind, "lineItems": line_items, "Date": day.isoformat(),
-                       "bankAccount": {"accountID": bank_account_id}, "Reference": f"MT{stamp}{reference}"}
+                       "bankAccount": {"accountID": bank_account_id}, "Reference": f"MT{stamp}{reference}",
+                       "currencyCode": run.currency}
         if contact_id:
             transaction["contact"] = {"contactID": contact_id}
         if existing_id:
@@ -153,7 +161,7 @@ def bank_transfer(run: Run, report, day, *, from_account, to_account, amount, pu
     """Post a bank transfer (a recorded one is deleted first: Xero has no update). Its id or False."""
     if not run.currency:
         logger.error("Publish: company %s has no currency; transfer not posted", run.entity.id)
-        _module_error(run, label, "the company's currency is not chosen", meta)
+        _module_error(run, label, NO_CURRENCY, meta)
         return False
     stamp = day.strftime("%Y%m%d")
     reference = f"MT{stamp}Withdrawal" if purpose == "company" else f"MT{stamp}Deposit"
@@ -286,6 +294,10 @@ def cash_sales(run: Run, report: Report, lines, existing) -> tuple[int, int]:
     """The day's sales as one authorised sales invoice to the cash sale contact, a line per sales
     account (``sales_lines``)."""
     meta = {"scope": "entity", "deps": DEPS_CASH_SALES, "module": "invoices"}
+    if not run.currency:
+        logger.error("Publish: company %s has no currency; cash sales not posted", run.entity.id)
+        _module_error(run, "Cash sales", NO_CURRENCY, meta)
+        return 0, 1
     try:
         contact = contact_for_role(run.entity.id, "cashsale_contact")
         if contact is None:
@@ -306,6 +318,7 @@ def cash_sales(run: Run, report: Report, lines, existing) -> tuple[int, int]:
                            "AccountCode": code, "TaxType": "NONE", "LineAmount": _amount(amount)}
                           for label, amount, code in lines],
             "Date": day.isoformat(), "DueDate": day.isoformat(), "Reference": description, "Status": "AUTHORISED",
+            "CurrencyCode": run.currency,
         }]}
         existing_id = _existing_id(existing, "INVOICE")
         if existing_id:

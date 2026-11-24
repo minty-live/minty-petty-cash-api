@@ -11,6 +11,10 @@ Ported from Flask in Phase 3 of the Flask retirement (2026-11-05). It replaces t
 3. a connection re-sync when the company isn't marked connected;
 4. the report (never a draft);
 5. the system-account check;
+5b. the currencies (2026-11-24): the organisation's base currency from Xero's ``Organisation`` must be
+   the company's, or nothing is sent (Xero can't change its base currency, so the sentence points at
+   Minty's). Xero not answering only logs: every entry names the company's currency, so Xero itself
+   refuses one its organisation doesn't use;
 6. ``SELECT ... FOR UPDATE NOWAIT`` and ``publishing_status = publishing``, so a second click is a
    409. Then the worker starts on its own thread.
 
@@ -54,6 +58,7 @@ from core.xero_tokens import XeroTokenUnavailable, xero_token
 from petty_cash.services.publish_reasons import latest_reason_items
 from petty_cash.services.reports import currency_code
 from petty_cash.services.xero_settings import minty_on_its_own, settings_complete
+from petty_cash.xero import client
 from petty_cash.xero import errors as pub_err
 from petty_cash.xero.steps import Run, publish_report, system_account_errors
 
@@ -85,6 +90,9 @@ ARCHIVED_ACCOUNT = ("{name} ({code}) is archived in Xero. Please check it in Xer
 #: A Petty Cash contact the day needs that Xero archived (2026-11-17): every publish of that step fails.
 ARCHIVED_CONTACT = ("{name}, your {label}, is archived in Xero. Restore it in Xero or choose another in Settings, "
                     "under Petty Cash Settings, then publish again.")
+#: The organisation's base currency isn't the company's (2026-11-24): nothing is sent.
+CURRENCY_MISMATCH = ("Xero uses {xero} for {org}, but this company uses {minty} in Minty, so nothing was sent. "
+                     "Disconnect Xero in Settings, change the company's currency to {xero}, then connect again.")
 CONNECTIONS_URL = "https://api.xero.com/connections"
 #: Asking Xero about an archived account holds the Publish click: short.
 ACCOUNT_TIMEOUT = (5, 15)
@@ -230,6 +238,40 @@ def _archived_contacts(row: EntityPettycashSettings, report: Report) -> list[str
     return [ARCHIVED_CONTACT.format(name=archived[cid], label=label) for cid, label in needed if cid in archived]
 
 
+def currency_mismatch(entity_id, access_token: str, org: str) -> str | None:
+    """The sentence when the organisation's base currency (Xero's ``Organisation``) isn't the
+    company's; None when they match, when the company has no currency (each step then refuses with
+    its reason), or when Xero can't tell - logged, as every entry names the company's currency."""
+    minty = currency_code(entity_id)
+    if not minty:
+        return None
+    try:
+        response = client.get("Organisation", access_token, org)
+    except requests.RequestException as exc:
+        logger.warning("Publish: Xero unreachable reading the organisation's currency for company %s: %s",
+                       entity_id, exc)
+        return None
+    if response.status_code != 200:
+        logger.warning("Publish: Xero answered %s reading the organisation's currency for company %s",
+                       response.status_code, entity_id)
+        return None
+    try:
+        found = (response.json() or {}).get("Organisations") or []
+        organisation = next((o for o in found if o.get("OrganisationID") == org), found[0] if found else {})
+    except (ValueError, AttributeError):
+        logger.warning("Publish: Xero's organisation answer was not JSON for company %s", entity_id)
+        return None
+    xero = str(organisation.get("BaseCurrency") or "").strip().upper()
+    if not xero:
+        logger.warning("Publish: Xero's organisation answer had no base currency for company %s", entity_id)
+        return None
+    if xero == minty.upper():
+        return None
+    logger.warning("Publish: company %s uses %s but its Xero organisation %s uses %s; refused", entity_id, minty,
+                   org, xero)
+    return CURRENCY_MISMATCH.format(xero=xero, minty=minty, org=organisation.get("Name") or "your Xero organisation")
+
+
 def sync_connection_status(entity: Entity, access_token: str) -> None:
     """The company's ``status`` from Xero's own list of connections (Flask's
     ``sync_entity_xero_status``): connected when its organisation is listed, disconnected when not.
@@ -288,6 +330,9 @@ def start_publish(entity_id, report: Report, person) -> dict:
             listed = "\n".join(f"• {e['expense']} - {e['account_code']}" for e in errors)
             message = f"System accounts detected:\n{listed}\n\nPlease update."
         raise PublishRefused(message, 400)
+    mismatch = currency_mismatch(entity_id, token.access_token, str(token.xero_org_id or entity.xero_org_id))
+    if mismatch:
+        raise PublishRefused(mismatch, 409)
     stale = stale_matches(entity, report, token.access_token)
     if stale:
         raise PublishRefused("\n".join(stale), 409)

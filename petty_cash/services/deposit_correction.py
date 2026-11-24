@@ -40,6 +40,7 @@ from petty_cash.services.reports import currency_code
 from petty_cash.services.sales import CASH_VALUE_NAME, cash_sales_from_detail
 from petty_cash.services.xero_settings import account_for_role
 from petty_cash.xero import client, publish_record
+from petty_cash.xero.errors import XERO_CURRENCY, translate_xero_error
 
 logger = logging.getLogger("petty-cash-api")
 
@@ -188,9 +189,11 @@ def _find_deposit_transfer(token, day: date, amount: Decimal) -> tuple[str | Non
 
 
 def _post_transfer(token, day: date, from_account: str, to_account: str, amount: Decimal, reference: str,
-                   currency: str) -> str | bool:
-    """Post one bank transfer; its BankTransferID (or True when Xero gave none), False when refused.
-    In the company's currency (owner, 2026-11-06: Flask sent HKD whatever the company's)."""
+                   currency: str) -> tuple[str | bool, str | None]:
+    """Post one bank transfer: ``(its BankTransferID or True when Xero gave none, None)``, or
+    ``(False, why)`` when refused. In the company's currency (owner, 2026-11-06: Flask sent HKD
+    whatever the company's). ``why`` is ``XERO_CURRENCY`` when Xero refused the currency (2026-11-24),
+    the one refusal whose words are shown; any other is logged only."""
     payload = {"BankTransfers": [{
         "FromBankAccount": {"AccountID": from_account, "CurrencyCode": currency},
         "ToBankAccount": {"AccountID": to_account, "CurrencyCode": currency},
@@ -202,12 +205,13 @@ def _post_transfer(token, day: date, from_account: str, to_account: str, amount:
         response = client.post("BankTransfers", token.access_token, token.xero_org_id, payload)
     except requests.RequestException as exc:
         logger.error("Deposit correction: Xero unreachable posting %s: %s", reference, exc)
-        return False
+        return False, None
     if response.status_code != 200:
         logger.error("Deposit correction: Xero refused %s: %s %s", reference, response.status_code,
                      (response.text or "")[:500])
-        return False
-    return client.parse_id(response.text, "BankTransfers", "BankTransferID") or True
+        why = translate_xero_error(response.status_code, response.text, subject="account")
+        return False, why if why == XERO_CURRENCY else None
+    return client.parse_id(response.text, "BankTransfers", "BankTransferID") or True, None
 
 
 def correct_in_xero(entity_id, report: Report, previous: Decimal, new: Decimal) -> tuple[bool, str | None]:
@@ -237,17 +241,18 @@ def correct_in_xero(entity_id, report: Report, previous: Decimal, new: Decimal) 
         return False, "This company has no currency chosen, so nothing was posted to Xero"
 
     stamp = day.strftime("%Y%m%d")
-    if not _post_transfer(token, day, bank, petty, previous, f"MT{stamp}DepositReversal", currency):
-        return False, ("Could not post reversal BankTransfer in Xero. The original deposit is still in Xero — "
+    reversed_, why = _post_transfer(token, day, bank, petty, previous, f"MT{stamp}DepositReversal", currency)
+    if not reversed_:
+        return False, why or ("Could not post reversal BankTransfer in Xero. The original deposit is still in Xero — "
                        "check server logs for details.")
     # The original is neutralised: a later republish must not delete it and strand the reversal.
     publish_record.forget_object(report.id, "deposit")
     if new <= 0:
         return True, None
 
-    replacement = _post_transfer(token, day, petty, bank, new, f"MT{stamp}DepositUpdated", currency)
+    replacement, why = _post_transfer(token, day, petty, bank, new, f"MT{stamp}DepositUpdated", currency)
     if not replacement:
-        return False, ("Reversal was posted in Xero, but the replacement deposit BankTransfer could not be created. "
+        return False, why or ("Reversal was posted in Xero, but the replacement deposit BankTransfer could not be created. "
                        "Check server logs for details.")
     # So a later republish edits THIS transfer rather than creating a third.
     org = Entity.objects.filter(id=entity_id).values_list("xero_org_id", flat=True).first()
