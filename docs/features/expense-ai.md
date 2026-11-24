@@ -67,6 +67,20 @@ minty-petty-cash-api's `python manage.py ai_policy`, never a release:
 - `ai_read`: one row per read asked for - `pending`, then `ok` or `failed` - charged to one grant
   (the oldest with room), with the module, the model that answered, the chain tried
   (`gemini-3.5-flash-lite:timeout>gemini-3.8-flash:ok`) and every attempt's tokens.
+- **Cost per company in Google's own figures (the user, 2026-11-24; minty-shared-py v0.20):** every
+  Vertex call (each model, each retry) carries the labels `env` (`production`/`development`, from
+  `APP_ENV`), `feature` (`petty_cash`) and `entity_id` (the company's id, lowercase) -
+  `ai.request_labels`. Nothing per receipt or person, and no company name. Cloud Billing > Reports >
+  Group by label then shows Google's cost per company to set beside `ai_read.estimated_cost`
+  (USD; the billing account is HKD). Reads before the release carry no labels.
+- **Each model's price is `ai_policy.model_prices`** (the user, 2026-11-24; minty-db v0.19):
+  `{"<model>": {"input": n, "output": n, "cached_input": n}}`, USD per 1M tokens, Vertex AI's
+  global-endpoint list prices (gemini-3.5-flash-lite 0.30 / 2.50 / 0.03, gemini-3.5-flash 1.50 /
+  9.00 / 0.15, checked 2026-11-24). A read's cost = uncached input at `input` + cached input at
+  `cached_input` + output and thinking at `output`, every attempt summed. A policy that names a model
+  without a price is refused by the database (`ck_ai_policy_prices`) and by `load_policy` (reading
+  OFF, logged). Change a price with an UPDATE or `manage.py ai_policy --set-price MODEL IN OUT
+  CACHED` (Petty Cash); a new model needs its price in the same change.
 - **What counts:** a grant is charged the tokens of reads a model answered (even with nothing usable
   in them); a failed read uses none of it, though its billed tokens are recorded and count against
   the extra caps (our cost guard). A grant is used up once its tokens reach its total - the read
@@ -129,7 +143,9 @@ notation. minty-shared-py v0.15:
 ## What the file may be instead (the user, 2026-11-24)
 
 A warning, never a refusal: shop managers sometimes attach a bank payment confirmation, an
-unrelated photo or an unreadable picture. minty-shared-py v0.18 asks for `document_type` (receipt,
+unrelated photo or an unreadable picture. (A card payment slip is NOT warned about here - it stays a
+receipt; only Payment Request's invoice prompt counts it as a bank payment confirmation, the user's
+"separate prompt", 2026-11-24.) minty-shared-py v0.18 asks for `document_type` (receipt,
 invoice, bank_payment_confirmation, other or unreadable), and every answered read - refused ones
 included - carries `document_warning`: `bank_payment_confirmation`, `other` or `unreadable`, else
 null (`ai.document_warning`; a receipt and an invoice are both fine). The suggestions still fill;

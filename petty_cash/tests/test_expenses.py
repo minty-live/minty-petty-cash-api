@@ -30,7 +30,15 @@ from minty_db.models import (
 
 from petty_cash.days import today
 from petty_cash.files import storage
-from petty_cash.tests.conftest import WEB, headers, make_entity, make_report, make_user, url
+from petty_cash.tests.conftest import (
+    MODEL_PRICES,
+    WEB,
+    headers,
+    make_entity,
+    make_report,
+    make_user,
+    url,
+)
 
 pytestmark = pytest.mark.django_db
 D3 = today() - timedelta(days=1)
@@ -174,7 +182,7 @@ def test_the_page_says_whether_the_receipt_reader_is_on(client, shop, lists, ai_
     if switch is None:
         AiPolicy.objects.filter(id=1).delete()
         AiPolicy.objects.create(id=1, primary_model="gemini-3.8-flash", default_grant={"tokens": 10000},
-                                limit_rules=[], invoice_reader_on=True)
+                                limit_rules=[], invoice_reader_on=True, model_prices=MODEL_PRICES)
     else:
         AiPolicy.objects.filter(id=1).update(receipt_reader_on=switch)
 

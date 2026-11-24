@@ -140,6 +140,14 @@ def notes(shop) -> dict:
     return ids
 
 
+#: ai_policy.model_prices (the user, 2026-11-24): USD per 1M tokens, every model the tests name.
+MODEL_PRICES = {
+    "gemini-3.8-flash": {"input": 0.75, "output": 3.75, "cached_input": 0.075},
+    "gemini-3.5-flash-lite": {"input": 0.30, "output": 2.50, "cached_input": 0.03},
+    "gemini-3.1-pro-preview": {"input": 2.00, "output": 12.00, "cached_input": 0.20},
+}
+
+
 @pytest.fixture
 def ai_policy(db) -> AiPolicy:
     """minty-db's one ``ai_policy`` row (seed_catalogue.sql writes it in a real database): one
@@ -147,4 +155,5 @@ def ai_policy(db) -> AiPolicy:
     the receipt reader on with the columns' own limits (owner, 2026-11-20: the switch is the row's,
     not the environment's). A test changes it as an operator would."""
     return AiPolicy.objects.create(id=1, primary_model="gemini-3.8-flash", backup_model=None,
-                                   default_grant={"tokens": 10000}, limit_rules=[], receipt_reader_on=True)
+                                   default_grant={"tokens": 10000}, limit_rules=[], receipt_reader_on=True,
+                                   model_prices=MODEL_PRICES)

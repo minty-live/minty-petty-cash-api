@@ -11,6 +11,7 @@ import json
 import re
 import threading
 from datetime import timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -135,6 +136,15 @@ def test_a_receipt_is_read_against_the_company_s_own_lists(client, shop, model):
     # the model read the bytes as sent, typed by the bytes (a PNG uploaded as image/jpeg goes as image/png)
     [request] = model.requests
     assert _parts(request)[1].inline_data.mime_type == "image/png"
+
+
+def test_the_read_is_labelled_for_cloud_billing(client, shop, model, monkeypatch):
+    """Google's cost per company: env, feature, entity - nothing per receipt or person (2026-11-24)."""
+    monkeypatch.setenv("APP_ENV", "development")
+    assert _extract(client, shop).status_code == 200
+    [request] = model.requests
+    assert request["config"].labels == {"env": "development", "feature": "petty_cash",
+                                        "entity_id": str(shop.entity.id).lower()}
 
 
 def test_the_prefix_carries_only_what_a_line_can_use_in_a_stable_order(client, shop, model):
@@ -656,6 +666,35 @@ def test_the_policy_command_changes_models_default_grant_and_caps_after_checking
     out = capsys.readouterr().out
     assert "models        : gemini-3.5-flash-lite -> gemini-3.8-flash" in out
     assert 'default grant : {"tokens": 50000, "days": 90}' in out
+
+
+def test_the_policy_command_sets_a_price_and_names_a_model_only_with_one(ai_policy, capsys):
+    """Each model's price is ai_policy.model_prices (the user, 2026-11-24): a model is named with its price."""
+    from django.core.management import call_command
+    from django.core.management.base import CommandError
+
+    with pytest.raises(CommandError, match="no price for gemini-3.5-flash"):
+        call_command("ai_policy", "--set-models", "gemini-3.5-flash")
+    call_command("ai_policy", "--set-price", "gemini-3.5-flash", "1.50", "9.00", "0.15",
+                 "--set-models", "gemini-3.5-flash")
+
+    ai_policy.refresh_from_db()
+    assert ai_policy.primary_model == "gemini-3.5-flash"
+    assert ai_policy.model_prices["gemini-3.5-flash"] == {"input": 1.5, "output": 9.0, "cached_input": 0.15}
+    assert "gemini-3.8-flash" in ai_policy.model_prices  # the others are kept
+    assert "price         : gemini-3.5-flash USD 1.5 in / 9.0 out / 0.15 cached in" in capsys.readouterr().out
+    with pytest.raises(CommandError, match="three numbers"):
+        call_command("ai_policy", "--set-price", "gemini-3.5-flash", "cheap", "9", "0.15")
+
+
+def test_a_read_s_cost_comes_from_the_policy_s_price(client, shop, model):
+    """5,000 in (none cached) + 300 out + 400 thinking at gemini-3.8-flash's policy price."""
+    _policy(model_prices={"gemini-3.8-flash": {"input": 1.0, "output": 10.0, "cached_input": 0.1}})
+
+    assert _extract(client, shop).status_code == 200
+
+    [read] = AiRead.objects.filter(entity_id=shop.entity.id)
+    assert read.estimated_cost == Decimal("0.012000")  # (5000 * 1 + 700 * 10) / 1M
 
 
 def test_the_policy_command_can_turn_the_automatic_grant_off(ai_policy):

@@ -45,7 +45,9 @@ class Command(BaseCommand):
         instruction, prefix, aliases = rr.prompt(_CONTEXT)
         result = ai.read(buffer.getvalue(), "image/png", config=config, instruction=instruction,
                          prefix_text=prefix, closing_text=ai_prompt.CLOSING, reply_model=rr.Reading,
-                         validate=lambda parsed: rr.validate(parsed, _CONTEXT, aliases), models=models)
+                         validate=lambda parsed: rr.validate(parsed, _CONTEXT, aliases), models=models,
+                         # a check, not a company: its own entity_id in Cloud Billing
+                         labels=ai.request_labels("connectivity-check", ai.FEATURE_PETTY_CASH))
 
         audit = result.audit
         self.stdout.write(f"answered by      : {audit.get('model_answered') or '-'}")
