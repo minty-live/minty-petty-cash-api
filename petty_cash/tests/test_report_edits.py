@@ -350,6 +350,24 @@ def test_one_receipt_per_line(client, shop, day):
     assert resp.status_code == 422 and resp.json() == {"error": "Attach one receipt per expense."}
 
 
+def test_a_line_with_no_receipt_is_saved_only_with_one(client, shop, day):
+    """No expense is saved without a receipt (the user, 2026-11-25): an older line that never had one
+    keeps its details until a receipt comes with the edit - the web's Edit Details refuses it too."""
+    report, line = day
+    ReportExpenseAttachment.objects.filter(report_expense_id=line.id).delete()
+
+    refused = _edit_line(client, shop, report.id, line.id, description="Posters")
+
+    assert refused.status_code == 422
+    assert refused.json() == {"error": "The receipt is still missing. Attach a receipt to continue."}
+    assert _line(line).description == "Flyers" and _keys(line) == []
+
+    resp = _edit_line(client, shop, report.id, line.id, description="Posters", receipt=_file("new.png", PNG))
+
+    assert resp.status_code == 200, resp.json()
+    assert _line(line).description == "Posters" and len(_keys(line)) == 1
+
+
 def test_fixed_a_new_receipt_replaces_the_line_s_and_the_old_file_goes_after_the_commit(
         client, shop, day, s3, django_capture_on_commit_callbacks):  # noqa: F811
     report, line = day

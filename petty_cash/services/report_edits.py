@@ -50,6 +50,8 @@ NO_RIGHT = "It looks like you don't have permission to edit this report."
 DRAFT = "This report is still a draft. Change it in the Daily Closing."
 PUBLISHING = "Xero is still publishing this report. Wait until it finishes, then edit it."
 LATEST = "This is the latest report. Use Edit Report to change it."
+#: the web's ``RECEIPT_MISSING`` (minty-petty-cash-web ``lib/expenses.ts``)
+RECEIPT_MISSING = "The receipt is still missing. Attach a receipt to continue."
 
 
 class EditRefused(Exception):
@@ -166,7 +168,8 @@ def edit_expense_line(report: Report, line: ReportExpense, user, *, description=
                       account_id=None, receipts=()) -> None:
     """Change a submitted line's details - never its amount. ``None`` leaves a field as it is;
     ``supplier_id`` / ``account_id`` are Xero ids; ``receipts`` are uploaded files that replace the
-    line's receipts."""
+    line's receipts. A line with no receipt keeps its details until the edit brings one: no expense
+    is saved without a receipt (the user, 2026-11-25)."""
     check_editable(report, user)
     entity_id = report.entity_id
 
@@ -189,6 +192,8 @@ def edit_expense_line(report: Report, line: ReportExpense, user, *, description=
             checked.append(checked_receipt(upload))
         except ExpenseRefused as refused:
             raise EditRefused(refused.message, 422) from None
+    if not checked and not ReportExpenseAttachment.objects.filter(report_expense_id=line.id).exists():
+        raise EditRefused(RECEIPT_MISSING, 422)
 
     item = account.name if account is not None else line.item
     label = item or (description if description is not None else line.description) or "EXPENSE"
