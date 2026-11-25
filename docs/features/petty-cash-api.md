@@ -88,6 +88,20 @@ Non-cash, as before. The close read, the Daily Report and Settings do not read `
 minty-db v0.11 (`requirements.txt`; the tag must be pushed). Tests:
 `test_sales.py::test_the_parts_follow_the_ticked_sales_accounts`, `test_an_unticked_part_gets_no_rows_on_save`.
 
+**Only amounts are stored (2026-11-25).** A Sales save writes a `report_sale` row only for a shown
+method with an amount: a blank or 0 writes none, and an amount cleared since deletes its row (Flask
+wrote a 0 row for every shown method: 32% of local rows). Methods the page doesn't show keep their rows.
+Every reader already takes no row as 0: the Sales page, the Daily Report and its public share link,
+the Xero sales invoice, the Petty Cash Report CSV and the deposit correction. A company's own method
+that was only ever saved blank therefore has no row, so deleting it removes it completely instead of
+switching it off. The zero rows older saves wrote are deleted by minty-db's hand-run
+`patches/2026-11-25_drop_zero_report_sale.sql`, applied 2026-11-25 on local `postgres` (22,373 of 69,536),
+Supabase `pettycashv3` (22,817 of 70,445) and `development` (98 of 103). The services still on the
+old code write new ones until this deploys; run the patch again after it. Minty's load does the same
+(`gen.py` `ZERO_SALES`, check R17). Tests:
+`test_sales.py::test_a_blank_or_zero_method_writes_no_row`, `test_clearing_a_saved_amount_deletes_its_row`,
+`test_a_companys_own_method_saved_blank_can_still_be_deleted`, `test_every_reader_takes_a_missing_row_as_zero`.
+
 **Each sales account has its own code (owner, 2026-11-17: "each sales should be tied"; minty-db v0.12).**
 Account mapping (`services/xero_cards.py`) has `electronicsale_account` ("Electronic Payment sales
 account code") and `deliverysale_account` ("Delivery sales account code") after Cash Sales', from the

@@ -3,7 +3,7 @@
 - ``GET /reports/sales?transaction_date=``: the day's draft (null before Opening made one), the
   company's electronic and delivery methods in Settings order with the day's amounts, and the cash.
 - ``PUT /reports/sales`` ``{transaction_date, cash_sales, amounts: {value_name: amount}, action,
-  edit_version}``: a method left out is zero; an amount is 0 to 99,999,999,999.99; a method the
+  edit_version}``: a method left out, blank or 0 keeps no row (2026-11-25); an amount is 0 to 99,999,999,999.99; a method the
   company has not switched on is 422. No draft for the day is 409 ``{error, to: "opening"}``; a save
   opened from an older ``edit_version`` is 409 ``{error, saved, next: "expenses"}`` (owner's
   decisions doc R2, 2026-11-19).

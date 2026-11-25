@@ -137,7 +137,7 @@ def test_save_next_writes_every_method_and_moves_on_to_expenses(client, shop, me
     amounts = _amounts(draft)
     assert amounts["cash_sales"] == Decimal("1000.50") and amounts["visa_sales"] == 200
     assert amounts["foodpanda_sales"] == Decimal("33.25")
-    assert amounts["alipay_sales"] == 0 and amounts["openrice_sales"] == 0  # every shown method gets a row
+    assert "alipay_sales" not in amounts and "openrice_sales" not in amounts  # a blank keeps no row, a cleared one loses it
     row = Report.objects.get(id=draft.id)
     assert (row.cashsale_total, row.nocashsale_total, row.total_sales) == (
         Decimal("1000.50"), Decimal("233.25"), Decimal("1233.75"))
@@ -265,3 +265,68 @@ def test_an_unticked_part_gets_no_rows_on_save(client, shop, methods):
     assert "foodpanda_sales" not in {m["value_name"] for m in _get(client, shop).json()["methods"]}
     delivery = {methods[v].id for v in ("foodpanda_sales", "keeta_sales", "openrice_sales")}
     assert not ReportSale.objects.filter(report_id=draft.id, sale_id__in=delivery).exists()
+
+
+# --- only amounts are stored (2026-11-25): a blank or 0 writes no row ---------------------------------
+
+
+def test_a_blank_or_zero_method_writes_no_row(client, shop, methods):
+    draft = _draft(shop)
+
+    resp = _put(client, shop, _body(cash_sales=0, amounts={"visa_sales": 25, "alipay_sales": 0, "keeta_sales": None}))
+
+    assert resp.status_code == 200, resp.content
+    assert _amounts(draft) == {"visa_sales": Decimal("25.00")}  # no Cash row and no zero rows
+    row = Report.objects.get(id=draft.id)
+    assert (row.cashsale_total, row.nocashsale_total, row.total_sales) == (0, 25, 25)
+
+
+def test_clearing_a_saved_amount_deletes_its_row(client, shop, methods):
+    draft = _draft(shop)
+    _put(client, shop, _body(cash_sales=40, amounts={"visa_sales": 25, "keeta_sales": 10}))
+    assert set(_amounts(draft)) == {"cash_sales", "visa_sales", "keeta_sales"}
+
+    resp = _put(client, shop, _body(cash_sales=0, amounts={"visa_sales": 0}))  # Keeta left out
+
+    assert resp.status_code == 200, resp.content
+    assert _amounts(draft) == {}
+    row = Report.objects.get(id=draft.id)
+    assert (row.cashsale_total, row.nocashsale_total, row.total_sales) == (0, 0, 0)
+    assert row.closing_balance == 120  # 100 + 20
+    page = _get(client, shop).json()
+    assert page["cash_sales"] is None and all(m["amount"] is None for m in page["methods"])
+
+
+def test_a_companys_own_method_saved_blank_can_still_be_deleted(client, shop, methods):
+    """A blank used to leave a zero row, and any row kept the method (switched off, never deleted)."""
+    own = SaleInfo.objects.create(sale_name="Kpay", value_name="kpay_sales", type=SaleType.ELECTRONIC,
+                                  entity_id=shop.entity.id, enabled=True)
+    EntitySaleSetting.objects.create(entity_id=shop.entity.id, sale_id=own.id, is_active=True, display_order=8)
+    _draft(shop)
+    assert _put(client, shop, _body(cash_sales=5)).status_code == 200
+
+    resp = client.delete(url(shop.entity.id, f"/sales-methods/{own.id}"), headers=headers(shop.owner.id))
+
+    assert resp.status_code == 200, resp.content
+    assert not SaleInfo.objects.filter(id=own.id).exists()
+    assert not EntitySaleSetting.objects.filter(sale_id=own.id).exists()
+
+
+def test_every_reader_takes_a_missing_row_as_zero(shop, methods):
+    """The report and its public share link, the Xero sales invoice, the CSV and the deposit
+    correction read the same with or without zero rows (old saves wrote them)."""
+    from petty_cash.routes.report import report_figures
+    from petty_cash.services.deposit_correction import _sales_by_type
+    from petty_cash.services.petty_cash_report_csv import _sales
+    from petty_cash.xero.steps import sales_lines
+
+    draft = _draft(shop, status="submitted", cashsale_total=50, nocashsale_total=30, total_sales=80)
+    _set(draft, methods, {"cash_sales": 50, "visa_sales": 30, "alipay_sales": 0, "keeta_sales": 0})
+
+    def read():
+        return (report_figures(draft, shop.entity.id), sales_lines(shop.entity.id, draft),
+                _sales(shop.entity.id, [draft]), _sales_by_type(draft))
+
+    with_zeros = read()
+    ReportSale.objects.filter(report_id=draft.id, amount=0).delete()
+    assert read() == with_zeros

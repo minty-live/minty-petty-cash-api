@@ -1,9 +1,10 @@
 """The report wizard's Sales step - Flask's ``blueprints/report/services/sales.py`` (and the totals
 helpers it calls in ``shared.py``), ported.
 
-Flask's rules: a save needs the day's draft; every method the page shows gets a ``report_sale``
-row, a method left out a zero; methods the page has no field for (an ``other`` one that is not
-Cash) are left alone; the closing balance is recomputed AFTER the rows are written; the saver
+Flask's rules: a save needs the day's draft; every method the page shows with an amount gets a
+``report_sale`` row, and a blank or 0 gets none (2026-11-25: Flask wrote a zero row; clearing an
+amount deletes its row, and every reader takes no row as 0); methods the page has no field for (an
+``other`` one that is not Cash) are left alone; the closing balance is recomputed AFTER the rows are written; the saver
 becomes the report's creator ("track last editor").
 """
 
@@ -171,8 +172,9 @@ def refresh_sales_totals(report: Report) -> None:
 
 @transaction.atomic
 def save_sales(entity_id, user, draft: Report, amounts: dict, action_type: str, opened=NOT_SENT) -> Report:
-    """Write the Sales step onto ``draft``: one ``report_sale`` row per method the page shows
-    (``amounts`` maps value_name -> amount; a missing method is zero), the totals, the closing
+    """Write the Sales step onto ``draft``: one ``report_sale`` row per method the page shows with
+    an amount (``amounts`` maps value_name -> amount; a missing method or a 0 has no row, and loses
+    the one it had), the totals, the closing
     balance, the progress and a history line - one transaction. A save opened from another
     ``edit_version`` (``opened``) raises ``StepAlreadySaved`` before anything is written."""
     draft = Report.objects.select_for_update().get(id=draft.id)
@@ -193,8 +195,10 @@ def save_sales(entity_id, user, draft: Report, amounts: dict, action_type: str, 
                 delivery_total += amount
             else:
                 shop_total += amount
-        updated = ReportSale.objects.filter(report_id=draft.id, sale_id=method["sale_id"]).update(amount=amount)
-        if not updated:
+        rows = ReportSale.objects.filter(report_id=draft.id, sale_id=method["sale_id"])
+        if not amount:
+            rows.delete()  # a blank or 0 keeps no row; an amount cleared since loses its row
+        elif not rows.update(amount=amount):
             ReportSale.objects.create(report_id=draft.id, sale_id=method["sale_id"], amount=amount)
 
     refresh_sales_totals(draft)
