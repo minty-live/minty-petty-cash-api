@@ -62,11 +62,18 @@ def test_a_receipt_in_another_currency_comes_back_converted_and_says_how(client,
     }
 
 
-@pytest.mark.parametrize("refused", [{"document_count": 2}, {"description": ""}])
-def test_a_refused_read_asks_for_no_rate(client, shop, model, rates, refused):
-    # owner, 2026-11-23: several receipts or nothing described - nothing is filled, so no rate
-    body = _extract(client, shop, model, currency="USD", amount=12.34, **refused).json()
+def test_a_refused_read_asks_for_no_rate(client, shop, model, rates):
+    # several receipts in the file (the only refusal, the user 2026-11-25): nothing is filled,
+    # so no rate
+    body = _extract(client, shop, model, currency="USD", amount=12.34, document_count=2).json()
     assert rates["asked"] == [] and body["suggestions"] is None
+
+
+def test_a_read_with_no_description_is_still_converted(client, shop, model, rates):
+    # the user, 2026-11-25: the description is not mandatory, so the amount fills and converts
+    body = _extract(client, shop, model, currency="USD", amount=12.34, description="").json()
+    assert [(f, t) for f, t, _ in rates["asked"]] == [("USD", "HKD")]
+    assert body["suggestions"]["amount"]["applied"] is True
 
 
 def test_the_company_s_own_currency_asks_for_no_rate(client, shop, model, rates):

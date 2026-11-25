@@ -350,18 +350,23 @@ EMPTY = {"supplier_contact_id": "", "supplier_name": "", "account_id": "", "amou
          "currency": "", "date": "", "description": ""}
 
 
-def test_nothing_usable_is_not_enough_evidence(client, shop, model):
-    # owner, 2026-11-23: nothing describes what was paid for, so the page says why
+def test_nothing_read_is_nothing_usable(client, shop, model):
+    # the user, 2026-11-25: no description is no refusal - a reply with nothing at all is still
+    # the reader's own "nothing usable" (the page says the read found nothing)
     s, reason = _read(client, shop, model, **EMPTY)
-    assert (s, reason) == (None, "no_description")
+    assert reason == "no_usable_field"
+    assert not any(s[f]["applied"] for f in ("supplier", "account", "amount", "description"))
 
 
 # --- the owner's launch decisions (2026-11-23, after IRD's "A Guide to Keeping Business Records")
 
 
-def test_a_receipt_with_no_description_is_not_enough_evidence(client, shop, model):
+def test_a_receipt_with_no_description_is_answered(client, shop, model):
+    # the user, 2026-11-25: the description is not mandatory
     s, reason = _read(client, shop, model, description="  ")
-    assert (s, reason) == (None, "no_description")
+    assert reason is None
+    assert (s["description"]["value"], s["description"]["applied"]) == ("", False)
+    assert s["amount"]["applied"] is True
 
 
 def test_several_receipts_in_one_file_are_refused_before_anything_else(client, shop, model):
@@ -369,11 +374,12 @@ def test_several_receipts_in_one_file_are_refused_before_anything_else(client, s
     assert (s, reason) == (None, "several_documents")
 
 
-def test_an_inferred_description_is_filled_and_marked_to_check_harder(client, shop, model):
+def test_an_inferred_description_is_filled_and_marked_inferred(client, shop, model):
+    # the user, 2026-11-25: filled like any other, and the page outlines it "Please check"
     s, reason = _read(client, shop, model, description="Groceries", description_inferred=True)
     assert reason is None
     assert (s["description"]["value"], s["description"]["applied"]) == ("Groceries", True)
-    assert (s["description"]["band"], s["description"]["inferred"]) == ("low", True)
+    assert (s["description"]["band"], s["description"]["inferred"]) == ("medium", True)
     assert s["account"]["account_id"] == "acc-0001"  # the account is still chosen
 
 
@@ -410,10 +416,10 @@ def test_a_receipt_an_invoice_or_an_unknown_type_warns_of_nothing(client, shop, 
 
 
 def test_the_warning_travels_on_a_refused_read_too(client, shop, model):
-    model.answer = FakeResponse(_reply(description="", document_type="other"))
+    model.answer = FakeResponse(_reply(document_count=2, document_type="other"))
     body = _extract(client, shop).json()
     assert (body["suggestions"], body["reason"], body["document_warning"]) == (
-        None, "no_description", "other",
+        None, "several_documents", "other",
     )
 
 
@@ -529,7 +535,7 @@ def test_nothing_usable_is_still_a_read(client, shop, model):
 
     body = _extract(client, shop).json()
 
-    assert body["reason"] == "no_description" and body["reader"]["percent_left"] == 43
+    assert body["reason"] == "no_usable_field" and body["reader"]["percent_left"] == 43
 
 
 def test_payment_request_reads_use_the_same_grants(client, shop, model):
