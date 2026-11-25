@@ -231,7 +231,9 @@ until then they were asked of Flask's `POST /api/internal/xero/publish-reasons`.
   back in Minty only and links Xero's archived contact of the name as it stands.
 - **"Map it now"**: `GET /xero/contacts` (the company's active Xero contacts) and
   `POST /contacts/{id}/xero-link {xero_contact_id}` (accounts-api's relink, reason `user`), both
-  `REPORT_PUBLISH`.
+  `REPORT_PUBLISH`. A Xero contact another Minty contact already has is refused with accounts-api's
+  sentence (409; matching never merges - the person merges the two in Settings first, the user
+  2026-11-25).
 - **An account gone from Xero (A3)**: `stale_matches`' sentence is the doc's - "<name> (<code>) is archived
   in Xero. Please check it in Xero, then map this account to the one you want to use (Settings, under
   General), and publish again."

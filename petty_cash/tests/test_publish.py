@@ -1053,3 +1053,22 @@ def test_a_line_whose_account_has_no_xero_code_is_refused_never_sent_as_200(mapp
     assert [(i["text"], i["expense_id"]) for i in items] == [
         ("Expense 'Taxi Fares' — " + steps.NO_XERO_CODE.format(name="Taxi Fares"), str(bad.id))]
     assert set(publish_record.load_record(report.id)["objects"]["expenses"]) == {str(good.id)}
+
+
+def test_mapping_now_to_a_xero_contact_another_contact_has_says_merge_first(client, mapped, monkeypatch):
+    """Matching never merges (the user, 2026-11-25): accounts-api refuses, and its sentence is shown."""
+    from minty_db.models import XeroContact
+
+    from petty_cash.xero import contacts
+
+    XeroContact.objects.create(entity_id=mapped.entity.id, xero_org_id=ORG, xero_guid="x-a", name="Alpha Ltd",
+                               status="ACTIVE")
+    kee = XeroContactSync.objects.create(entity_id=mapped.entity.id, name="Kee Wah", xero_contact_id="x-old")
+
+    def refused(*args):
+        raise contacts.RelinkRefused("Kee Wah Bakery already has that Xero contact. Merge the two in Settings first, or choose another contact.", 409)
+
+    monkeypatch.setattr(contacts, "relink", refused)
+    resp = client.post(url(mapped.entity.id, f"/contacts/{kee.id}/xero-link"), {"xero_contact_id": "x-a"},
+                       content_type="application/json", headers=headers(mapped.owner.id))
+    assert (resp.status_code, resp.json()["error"]) == (409, "Kee Wah Bakery already has that Xero contact. Merge the two in Settings first, or choose another contact.")

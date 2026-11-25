@@ -316,8 +316,9 @@ def xero_contacts(request):
 @router.post("/contacts/{contact_id}/xero-link")
 def map_contact(request, contact_id: str):
     """``{xero_contact_id}``: the Minty contact now uses that Xero contact (one of the company's
-    active copies) - merged into the Minty contact already holding it, if any (accounts-api's relink,
-    the one implementation). Minty never restores anything in Xero."""
+    active copies; accounts-api's relink, the one implementation). One another Minty contact already
+    has is refused with accounts-api's sentence (409) - matching never merges, the person merges the two
+    in Settings first (the user, 2026-11-25). Minty never restores anything in Xero."""
     from minty_db.models import Entity, XeroContact, XeroContactSync
 
     from petty_cash.xero.contacts import RelinkRefused, relink
@@ -342,9 +343,8 @@ def map_contact(request, contact_id: str):
         answer = relink(entity.id, contact.id, copy.xero_guid, "user", request.auth_user.id)
     except RelinkRefused as refused:
         raise Refused(refused.message, refused.status) from None
-    said = (f"{contact.name} merged into the contact that already uses {copy.name}." if answer.get("merged")
-            else f"{contact.name} now uses {copy.name} in Xero.")
-    return JsonResponse({"message": said, "contact_id": answer.get("contact_id")})
+    return JsonResponse({"message": f"{contact.name} now uses {copy.name} in Xero.",
+                         "contact_id": answer.get("contact_id")})
 
 
 @router.get("/reports/{report_id}/publishing-status")

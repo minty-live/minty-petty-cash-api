@@ -37,7 +37,7 @@
     },
     "/api/petty-cash/v1/companies/{entity_id}/contacts/{contact_id}/xero-link": {
       "post": {
-        "description": "``{xero_contact_id}``: the Minty contact now uses that Xero contact (one of the company's\nactive copies) - merged into the Minty contact already holding it, if any (accounts-api's relink,\nthe one implementation). Minty never restores anything in Xero.",
+        "description": "``{xero_contact_id}``: the Minty contact now uses that Xero contact (one of the company's\nactive copies; accounts-api's relink, the one implementation). One another Minty contact already\nhas is refused with accounts-api's sentence (409) - matching never merges, the person merges the two\nin Settings first (the user, 2026-11-25). Minty never restores anything in Xero.",
         "operationId": "petty_cash_routes_report_map_contact",
         "parameters": [
           {
