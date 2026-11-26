@@ -36,7 +36,7 @@ from minty_db.models import (
 from petty_cash.days import hk, today
 from petty_cash.files import storage
 from petty_cash.services import opening as opening_service
-from petty_cash.tests.conftest import headers, make_report, make_user, url
+from petty_cash.tests.conftest import headers, make_report, make_user, set_starting_cash, url
 from petty_cash.tests.test_expenses import PNG
 
 pytestmark = pytest.mark.django_db
@@ -94,6 +94,7 @@ def test_the_opening_read_has_no_version_before_the_day_has_a_report(client, sho
 
 
 def test_the_first_start_creates_the_report_at_version_one_saved_by_its_starter(client, shop):
+    set_starting_cash(shop.entity)
     resp = _put(client, shop, "opening", {"cash_addition": 30, "withdrawal": "company", "edit_version": None})
 
     assert resp.status_code == 200, resp.content
@@ -103,6 +104,7 @@ def test_the_first_start_creates_the_report_at_version_one_saved_by_its_starter(
 
 
 def test_a_second_start_from_a_page_read_before_the_report_existed_is_turned_away(client, shop, sam):
+    set_starting_cash(shop.entity)
     first = {"cash_addition": 30, "withdrawal": "personal", "edit_version": None}
     assert _put(client, shop, "opening", first).status_code == 200
     theirs = Report.objects.get(entity_id=shop.entity.id, transaction_date=D3)
@@ -169,6 +171,7 @@ def test_a_save_on_the_current_version_applies_and_moves_the_version_on(client, 
 
 def test_an_opening_save_with_a_version_on_a_day_with_no_report_starts_it(client, shop):
     """The report the page was read at is gone (deleted since): the save starts the day again."""
+    set_starting_cash(shop.entity)
     resp = _put(client, shop, "opening", {"cash_addition": 30, "edit_version": 4})
 
     assert resp.status_code == 200, resp.content

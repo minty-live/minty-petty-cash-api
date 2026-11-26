@@ -11,7 +11,7 @@ from minty_db.enums import EntityRole
 from minty_db.models import EntityPettycashSettings, Report, ReportHistory, UserEntity
 
 from petty_cash.days import today
-from petty_cash.tests.conftest import headers, make_report, make_user, url
+from petty_cash.tests.conftest import headers, make_report, make_user, set_starting_cash, url
 
 pytestmark = pytest.mark.django_db
 TODAY = today()
@@ -119,6 +119,7 @@ def test_save_next_creates_the_draft_from_the_servers_opening(client, shop):
 
 
 def test_save_exit_keeps_the_draft_on_opening(client, shop):
+    set_starting_cash(shop.entity)
     body = _put(client, shop, _body(D3, action="exit")).json()
 
     assert body["next"] == "dashboard" and body["current_section"] == "opening"
@@ -126,6 +127,7 @@ def test_save_exit_keeps_the_draft_on_opening(client, shop):
 
 
 def test_saving_again_updates_the_same_draft_without_touching_its_closing(client, shop):
+    set_starting_cash(shop.entity)
     first = _put(client, shop, _body(D3, cash_addition=10)).json()
     Report.objects.filter(id=first["draft_id"]).update(closing_balance=999, current_section="expenses",
                                                       completed_sections=["opening", "sales"])
@@ -155,6 +157,7 @@ def test_a_day_out_of_sequence_is_a_409_for_the_dashboard(client, shop):
 
 
 def test_a_future_day_is_refused(client, shop):
+    set_starting_cash(shop.entity)
     resp = _put(client, shop, _body(TODAY + timedelta(days=1)))
 
     assert resp.status_code == 409

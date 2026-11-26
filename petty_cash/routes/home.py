@@ -56,6 +56,8 @@ def home_payload(entity_id: str, person) -> dict:
         ),
         "draft_date": iso(state["draft_date"]),
         "start_date": iso(state["start_date"]),
+        # the starting cash is saved (a 0 counts); false = not set, asked before the first report
+        "opening_set": state["start_date"] is not None,
         "published": {
             day: {
                 "id": str(row["id"]),

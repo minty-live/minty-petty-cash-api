@@ -109,6 +109,18 @@ def url(entity_id, rest="") -> str:
     return f"/api/petty-cash/v1/companies/{entity_id}{rest}"
 
 
+def set_starting_cash(entity, *, opening=0, start=None):
+    """The company's starting cash as onboarding (or the first report's question) saves it. Without
+    it a company's FIRST report may not start (``OPENING_NOT_SET``, the user, 2026-11-26)."""
+    from datetime import date
+
+    from minty_db.models import EntityPettycashSettings
+
+    EntityPettycashSettings.objects.update_or_create(
+        entity_id=entity.id, defaults={"opening_balance": opening, "start_date": start or date(2000, 1, 1)}
+    )
+
+
 def make_report(entity, day, *, status="submitted", created_by=None, **fields):
     """A report row as Flask's ``Report(...)`` inserts it - its Python defaults spelled out
     (rule 0: SQLAlchemy's ``default=`` never reaches a Django insert)."""

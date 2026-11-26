@@ -10,6 +10,12 @@ Two people starting the same day (owner's decisions doc R1, 2026-11-19): the fir
 the second is refused with ``REPORT_STARTED`` and nothing of theirs is written - whether the report
 was there when the save began (their page was read before it existed) or it lands between the
 check and the insert (the ``report_entity_date_key`` unique key turns the insert away).
+
+The starting cash (the user, 2026-11-26): onboarding may skip the opening balance, which then stays
+NOT SET (``start_date`` and ``opening_balance`` NULL - never 0). A company with no report and nothing
+set may not start a report (``OPENING_NOT_SET``); ``set_first_opening`` saves the date and the amount
+first. Two people at once: the decision is made on the LOCKED settings row, so the second is told
+what the first saved (``OpeningAlreadySet``) and overwrites nothing.
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ from decimal import Decimal
 
 from django.db import IntegrityError, transaction
 from minty_db.enums import ReportStatus
-from minty_db.models import Report
+from minty_db.models import EntityPettycashSettings, Report
 
 from petty_cash.days import today
 from petty_cash.money import cents
@@ -41,6 +47,9 @@ from petty_cash.services.reports import (
 
 NEGATIVE = "Hmm, it looks like your cash balance is negative. Could you fix that first?"
 REPORT_STARTED = "A report for this date has already been started"
+OPENING_NOT_SET = "Set your starting cash before your first report."
+OPENING_SET = "The starting cash was just set by someone else."
+OPENING_TOO_LATE = "Your first report has already started, so the starting cash can't be set here."
 
 
 class OpeningRefused(Exception):
@@ -59,6 +68,43 @@ class ReportStarted(Exception):
         super().__init__(REPORT_STARTED)
         self.message = REPORT_STARTED
         self.report = report
+
+
+class OpeningAlreadySet(Exception):
+    """Someone set the starting cash first: what they saved."""
+
+    def __init__(self, start_date, opening_balance: Decimal):
+        super().__init__(OPENING_SET)
+        self.start_date = start_date
+        self.opening_balance = opening_balance
+
+
+class OpeningTooLate(Exception):
+    """The company already has a report: the starting cash is the first report's, too late here."""
+
+
+def opening_not_set(entity_id) -> bool:
+    """No start date and no report at all: the first report must ask for the starting cash. A
+    company that already reports (older ones have no start date) is never asked."""
+    if first_report_defaults(entity_id)[1] is not None:
+        return False
+    return not Report.objects.filter(entity_id=entity_id).exists()
+
+
+@transaction.atomic
+def set_first_opening(entity_id, start_date, opening_balance: Decimal) -> None:
+    """Save the starting cash, once. The row is created if missing (``entity_id`` is its key, so two
+    creates cannot both land), then locked: the check is made on what the lock sees."""
+    EntityPettycashSettings.objects.get_or_create(entity_id=entity_id)
+    row = EntityPettycashSettings.objects.select_for_update().get(entity_id=entity_id)
+    if row.start_date is not None:
+        raise OpeningAlreadySet(row.start_date, cents(row.opening_balance))
+    if Report.objects.filter(entity_id=entity_id).exists():
+        raise OpeningTooLate()
+    row.opening_balance = opening_balance
+    row.start_date = start_date
+    row.opening_skipped_at = None
+    row.save(update_fields=["opening_balance", "start_date", "opening_skipped_at"])
 
 
 def first_report_date_error(day, today_, entity_id) -> str | None:

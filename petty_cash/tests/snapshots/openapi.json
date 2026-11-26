@@ -204,6 +204,26 @@
         ]
       }
     },
+    "/api/petty-cash/v1/companies/{entity_id}/opening-balance": {
+      "put": {
+        "operationId": "petty_cash_routes_opening_set_starting_cash",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        },
+        "security": [
+          {
+            "PettyCashBearerAuth": []
+          }
+        ],
+        "summary": "Set Starting Cash",
+        "tags": [
+          "Opening"
+        ]
+      }
+    },
     "/api/petty-cash/v1/companies/{entity_id}/reports": {
       "get": {
         "operationId": "petty_cash_routes_history_history",

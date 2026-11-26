@@ -11,11 +11,21 @@ A date rule's refusal is 409 ``{error, to: "dashboard"}``; a negative balance 40
 the day's report started by someone else first is 409 ``{error: "A report for this date has already
 been started", report_id, to}``; a save opened from an older version is 409 ``{error: "This step was
 already saved by {name} at {time}", saved, next: "sales"}``. ``REPORT_EDIT_OWN`` throughout.
+
+- ``PUT /opening-balance`` ``{start_date, opening_balance}`` (the user, 2026-11-26): the company's
+  starting cash, asked before its FIRST report when onboarding skipped it. Saved once: a second
+  person is 409 ``{code: "OPENING_SET", start_date, opening_balance}`` (what the first saved); a
+  company that already has a report is 409 ``REPORT_EXISTS``. Until it is set, starting a first
+  report is 409 ``{code: "OPENING_NOT_SET", to: "dashboard"}``.
 """
 
 from __future__ import annotations
 
+import logging
+from decimal import Decimal, InvalidOperation
+
 from minty_db.enums import ReportStatus
+from minty_db.models import CurrencyInfo, Entity
 from ninja import Router
 
 from core.exceptions import Refused
@@ -31,9 +41,15 @@ from petty_cash.routes._input import (
     query_day,
     require_edit,
 )
+from petty_cash.services import opening as opening_service
 from petty_cash.services.opening import (
     NEGATIVE,
+    OPENING_NOT_SET,
+    OPENING_SET,
+    OPENING_TOO_LATE,
+    OpeningAlreadySet,
     OpeningRefused,
+    OpeningTooLate,
     ReportStarted,
     first_report_opening,
     new_report_date_problem,
@@ -45,11 +61,13 @@ from petty_cash.services.reports import (
     StepAlreadySaved,
     currency_code,
     draft_payload,
+    future_date_error,
     progress_payload,
     submitted_report_for,
 )
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 # Owner 2026-10-21: never a silent "$" - a company with no currency picks one before any report.
 NO_CURRENCY = "No currency is selected for this company. Choose one in Settings, under General, to start a report."
@@ -109,6 +127,8 @@ def save_opening_step(request):
 
     if not currency_code(entity_id):
         raise Refused(NO_CURRENCY, 409, to="dashboard")
+    if opening_service.opening_not_set(entity_id):
+        raise Refused(OPENING_NOT_SET, 409, code="OPENING_NOT_SET", to="dashboard")
     problem = new_report_date_problem(entity_id, day)
     if problem:
         raise Refused(problem, 409, to="dashboard")
@@ -136,3 +156,66 @@ def save_opening_step(request):
     except StepAlreadySaved as stale:
         raise already_saved(stale, opening_payload(entity_id, day), "sales") from None
     return progress_payload(draft, "sales" if save["action_type"] == "save_next" else "dashboard")
+
+
+
+# --- the starting cash, before the first report (the user, 2026-11-26) -------------------------------
+
+NO_START_DATE = "Choose the start date to continue."
+NO_OPENING = "The cash in your petty cash box is still empty. Add the amount to continue."
+BAD_OPENING = "Enter the cash in your petty cash box as 0 or more."
+
+
+def _company_currency(entity_id) -> CurrencyInfo | None:
+    currency_id = Entity.objects.filter(id=entity_id).values_list("currency_id", flat=True).first()
+    return CurrencyInfo.objects.filter(id=currency_id).first() if currency_id else None
+
+
+def _starting_cash(raw, currency: CurrencyInfo) -> Decimal:
+    """A JSON number of 0 or more, in the currency's own decimal places (JPY: whole amounts) - the
+    same rule as onboarding's save, so both writers agree. Blank is refused, never read as 0."""
+    if raw is None:
+        raise Refused(NO_OPENING, 422)
+    number = amount(raw)
+    if number is None:
+        raise Refused(BAD_OPENING, 422)
+    try:
+        exact = Decimal(str(raw))
+    except InvalidOperation:
+        raise Refused(BAD_OPENING, 422) from None
+    places = currency.decimal_places if currency.decimal_places is not None else 2
+    if exact.normalize().as_tuple().exponent < -places:
+        code = (currency.currency_code or "").strip()
+        raise Refused(f"That amount has more decimal places than {code} allows ({places}).", 422)
+    return exact.quantize(Decimal(1).scaleb(-places))
+
+
+@router.put("/opening-balance")
+def set_starting_cash(request):
+    require_edit(request)
+    entity_id = request.company.id
+    body = json_body(request)
+    if not isinstance(body, dict):
+        raise Refused("Send the starting cash as JSON.", 422)
+    currency = _company_currency(entity_id)
+    if currency is None:
+        raise Refused(NO_CURRENCY, 409, to="dashboard")
+    day = parse_day(body.get("start_date"))
+    if day is None:
+        raise Refused(NO_START_DATE, 422)
+    problem = future_date_error(day, today())
+    if problem:
+        raise Refused(problem, 422)
+    balance = _starting_cash(body.get("opening_balance"), currency)
+
+    try:
+        opening_service.set_first_opening(entity_id, day, balance)
+    except OpeningAlreadySet as already:
+        raise Refused(
+            OPENING_SET, 409, code="OPENING_SET", start_date=already.start_date.isoformat(),
+            opening_balance=out(already.opening_balance),
+        ) from None
+    except OpeningTooLate:
+        raise Refused(OPENING_TOO_LATE, 409, code="REPORT_EXISTS", to="dashboard") from None
+    logger.info("starting cash set: start=%s amount=%s", day, balance)
+    return {"start_date": day.isoformat(), "opening_balance": out(balance)}
