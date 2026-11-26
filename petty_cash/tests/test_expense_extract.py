@@ -147,6 +147,17 @@ def test_the_read_is_labelled_for_cloud_billing(client, shop, model, monkeypatch
                                         "entity_id": str(shop.entity.id).lower()}
 
 
+def test_the_account_can_only_be_one_of_the_accounts_sent(client, shop, model):
+    """The user, 2026-11-26: a code like 6000_01_09 came back in place of its short id and was
+    dropped - the reply schema holds account_id to the short ids in the prefix."""
+    _extract(client, shop)
+    [request] = model.requests
+    sent = [line.split(" | ")[0] for line in _parts(request)[0].text.splitlines()
+            if line.startswith("acc_")]
+    assert sent
+    assert request["config"].response_json_schema["properties"]["account_id"]["enum"] == sent
+
+
 def test_the_prefix_carries_only_what_a_line_can_use_in_a_stable_order(client, shop, model):
     _extract(client, shop)
 
@@ -160,7 +171,8 @@ def test_the_prefix_carries_only_what_a_line_can_use_in_a_stable_order(client, s
     # short ids only: the company's own ids never reach the model
     assert "acc-0001" not in prefix and "con-0001" not in prefix
     assert model.requests[0]["config"].system_instruction == ai_prompt.instruction("receipt")
-    assert "acc_01" not in json.dumps(model.requests[0]["config"].response_json_schema)
+    # the reply schema holds account_id to the short ids (2026-11-26); never the company's own ids
+    assert "acc-0001" not in json.dumps(model.requests[0]["config"].response_json_schema)
 
 
 #: A PNG just over 1 MB - ``ai_policy.max_file_mb`` is at least 1.

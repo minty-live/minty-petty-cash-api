@@ -218,7 +218,10 @@ def read_receipt(entity_id, user_id, data: bytes, mime: str, report_date: date |
                          prefix_text=prefix, closing_text=ai_prompt.CLOSING, reply_model=Reading,
                          validate=lambda parsed: validate(parsed, context, aliases),
                          models=policy.models,
-                         labels=ai.request_labels(entity_id, ai.FEATURE_PETTY_CASH))
+                         labels=ai.request_labels(entity_id, ai.FEATURE_PETTY_CASH),
+                         # only an account sent (the user, 2026-11-26: a code like 6000_01_09
+                         # came back in place of its short id and was dropped)
+                         choices={"account_id": aliases.account_ids})
     finally:
         # Even if something here raised, the reserved read is closed (failed, so never counted).
         ai_allowance.finish(read_id, result)
