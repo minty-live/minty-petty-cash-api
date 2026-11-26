@@ -30,7 +30,7 @@ shares with minty-payment-request-api's invoice reader. The answer to the web is
   dropped, never repaired).
 - `minty_shared.ai` (minty-shared-py, extra `ai`) - the engine: the switches, the models and their
   failover, the call and its one retry, usage and cost, and the ONE log line (numbers only, never a
-  value read off a receipt; `model=` is the model that answered, `attempts=` the chain). `minty_shared.model_input` makes the small copy the model reads (an
+  value read off a receipt; `model=` is the model that answered, `attempts=` the chain, `unanswered=` the calls sent that got no reply - minty-shared v0.23: each also has its own `call not answered` warning, and `ai_read.attempts` shows it as `model:outcome(N unanswered)`, because Google may bill such a call though its tokens are unknown). `minty_shared.model_input` makes the small copy the model reads (an
   image capped at 2048 px and saved once as JPEG; a PDF whole, every page - minty-shared v0.16, the
   user 2026-11-24; the 10 MB limit stays; an iPhone HEIC is decoded through `minty_shared.images`
   and sent as JPEG like any photo - minty-shared v0.19). The read uses the upload itself;

@@ -567,9 +567,11 @@ def test_the_backup_answers_when_the_primary_fails_and_the_row_says_so(client, s
     assert [r["model"] for r in model.requests] == ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
     [row] = AiRead.objects.filter(entity_id=shop.entity.id)
     assert (row.status, row.model_answered) == ("ok", "gemini-3.8-flash")
-    assert row.attempts == "gemini-3.5-flash-lite:timeout>gemini-3.8-flash:ok"
+    # the timed-out call got no reply, so its tokens are unknown - counted (minty-shared v0.23)
+    chain = "gemini-3.5-flash-lite:timeout(1 unanswered)>gemini-3.8-flash:ok"
+    assert row.attempts == chain
     [line] = [r.getMessage() for r in caplog.records if "receipt_ai: extract" in r.getMessage()]
-    assert "model=gemini-3.8-flash attempts=gemini-3.5-flash-lite:timeout>gemini-3.8-flash:ok" in line
+    assert f"model=gemini-3.8-flash attempts={chain}" in line and "unanswered=1" in line
 
 
 def test_a_model_change_takes_effect_on_the_next_read(client, shop, model):
