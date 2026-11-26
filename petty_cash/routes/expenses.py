@@ -169,9 +169,9 @@ def expenses_payload(request, day) -> dict:
         "accounts": [{"id": public_id(a), "code": a.xero_code or "", "name": a.name}
                      for a in expense_accounts(entity_id)],
         "permissions": {"create_supplier": has_permission(request.auth_user, Permission.CONTACT_CREATE, entity_id)},
-        # whether "Read with AI" is offered (the receipt is read only on that press) and the company's
-        # reads left, shared with Payment Request (owner, 2026-11-18)
-        "reader": receipt_reader.reader_status(entity_id),
+        # whether a receipt is read on attaching (the user, 2026-11-26) - on, and the company's AI
+        # allowance (shared with Payment Request) not used up - and when this person first read
+        "reader": receipt_reader.reader_status(entity_id, request.auth_user.id),
     }
 
 

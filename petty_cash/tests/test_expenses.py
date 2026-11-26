@@ -205,8 +205,9 @@ def test_the_page_says_whether_the_receipt_reader_is_on(client, shop, lists, ai_
     assert resp.status_code == 200, resp.content
     expected = {"enabled": False}
     if enabled:
+        # first_read_at: the signed-in person has never read (sizes the reading cat, 2026-11-26)
         expected = {"enabled": True, "reads_used": None, "reads_limit": None, "reads_left": None,
-                    "percent_left": 100, "blocked": False, "resumes_at": None}
+                    "percent_left": 100, "blocked": False, "resumes_at": None, "first_read_at": None}
     assert resp.json()["reader"] == expected
 
 

@@ -123,8 +123,10 @@ def test_a_receipt_is_read_against_the_company_s_own_lists(client, shop, model):
     body = resp.json()
     assert body["reason"] is None
     # the first read gave the company its one-time grant (10,000 tokens) and used 5,700 of it
+    first = AiRead.objects.get(entity_id=shop.entity.id, status="ok").created_at.isoformat()
     assert body["reader"] == {"enabled": True, "reads_used": None, "reads_limit": None, "reads_left": None,
-                              "percent_left": 43, "blocked": False, "resumes_at": None}
+                              "percent_left": 43, "blocked": False, "resumes_at": None,
+                              "first_read_at": first}
     s = body["suggestions"]
     # no confidence is asked (owner, 2026-11-20): every value is filled and marked to check
     assert s["supplier"] == {"value": "ABC Supplies", "confidence": 0.0, "band": "medium",
@@ -191,6 +193,36 @@ def test_refusals_past_the_checks_are_a_silent_no_suggestion(client, shop, model
     body = resp.json()
     assert resp.status_code == 200 and (body["suggestions"], body["reason"]) == (None, reason)
     assert model.requests == [] and not AiRead.objects.exists()  # refused before a read: none used
+
+
+def test_the_answer_says_when_this_person_first_read(client, shop, model):
+    """The user, 2026-11-26: the reading cat is large on a person's first day, small after - from
+    their earliest answered read, any company."""
+    _policy(max_file_mb=1)
+    before = _extract(client, shop, receipt=BIG_PNG).json()
+    assert before["reader"]["first_read_at"] is None  # refused before a read: never read yet
+    _policy(max_file_mb=10)
+    first = _extract(client, shop).json()["reader"]["first_read_at"]
+    row = AiRead.objects.get(entity_id=shop.entity.id, user_id=shop.owner.id, status="ok")
+    assert first == row.created_at.isoformat()
+    assert _extract(client, shop).json()["reader"]["first_read_at"] == first  # the earliest stays
+
+
+def test_a_failed_read_or_someone_else_s_is_not_this_person_s_first_read(client, shop, model):
+    other = make_user("other-reader@test.com")
+    AiRead.objects.create(entity_id=shop.entity.id, user_id=shop.owner.id, module="petty_cash",
+                          status="failed")
+    AiRead.objects.create(entity_id=shop.entity.id, user_id=other.id, module="payment_request",
+                          status="ok")
+    assert receipt_reader.reader_status(shop.entity.id, shop.owner.id)["first_read_at"] is None
+    assert receipt_reader.reader_status(shop.entity.id, other.id)["first_read_at"] is not None
+
+
+def test_too_large_names_the_limit_so_the_page_can_say_it(client, shop, model):
+    """The user, 2026-11-26: "This file is too large (max 10 MB)." - the limit is ai_policy's."""
+    _policy(max_file_mb=1)
+    body = _extract(client, shop, receipt=BIG_PNG).json()
+    assert (body["reason"], body["max_file_mb"]) == ("file_too_large", 1)
 
 
 def test_a_company_with_nothing_to_choose_from_asks_no_question(client, shop, model):
@@ -579,8 +611,8 @@ def test_the_backup_answers_when_the_primary_fails_and_the_row_says_so(client, s
     assert [r["model"] for r in model.requests] == ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
     [row] = AiRead.objects.filter(entity_id=shop.entity.id)
     assert (row.status, row.model_answered) == ("ok", "gemini-3.8-flash")
-    # the timed-out call got no reply, so its tokens are unknown - counted (minty-shared v0.23)
-    chain = "gemini-3.5-flash-lite:timeout(1 unanswered)>gemini-3.8-flash:ok"
+    # the timed-out call got no reply, so its tokens are unknown - counted with its status (minty-shared v0.27)
+    chain = "gemini-3.5-flash-lite:timeout(1 unanswered: TimeoutError)>gemini-3.8-flash:ok"
     assert row.attempts == chain
     [line] = [r.getMessage() for r in caplog.records if "receipt_ai: extract" in r.getMessage()]
     assert f"model=gemini-3.8-flash attempts={chain}" in line and "unanswered=1" in line

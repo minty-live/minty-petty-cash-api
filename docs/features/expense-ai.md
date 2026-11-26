@@ -1,7 +1,7 @@
 # Expense AI - reading a receipt into the expense form
 
-When a receipt is attached on minty-petty-cash-web's Expenses stage and the person presses **Read
-receipt** (never on attaching it - owner, 2026-11-18), a vision model reads it and the form's fields (amount, date, description, supplier, account) are **pre-filled as suggestions** the
+When a receipt is attached on minty-petty-cash-web's Expenses stage it is read at once (the user,
+2026-11-26; until then only on a **Read receipt** press - owner, 2026-11-18): a vision model reads it and the form's fields (amount, date, description, supplier, account) are **pre-filled as suggestions** the
 person confirms. Nothing is saved without their **Add**. A supplier the company does not have is
 added automatically, but only when the line is saved, never by the read (the user, 2026-11-23; see
 *A supplier the company does not have* below). The form stays editable while the read runs (or fails) in the background. The product and
@@ -15,8 +15,8 @@ shares with minty-payment-request-api's invoice reader. The answer to the web is
 ## Where it lives
 
 - `GET /reports/expenses` carries `reader` (a usable `ai_policy` with `receipt_reader_on`, read on
-  the call, with the company's AI allowance left - below): the app offers "Read receipt" only
-  when it is on. Switched off it is `{"enabled": false}` alone.
+  the call, with the company's AI allowance - below): the app reads a new receipt only when it is
+  on and not used up. Switched off it is `{"enabled": false}` alone.
 - `POST /reports/expenses/extract` (`petty_cash/routes/expenses.py::extract_expense`) - who may
   ask (`require_edit`, 403) and the file (one PDF / JPEG / PNG / HEIC of at most 10 MB by its
   bytes - a HEIC must open, `services/expenses.py::checked_receipt`, 422) are refused with the
@@ -95,10 +95,13 @@ minty-petty-cash-api's `python manage.py ai_policy`, never a release:
   `minty_shared.ai.APPROVED_PROVIDERS` (Gemini today) is ever called; a model id names its provider
   (`gemini-...`, or `<provider>:<model>`), so another approved provider can be added later.
 - **The answer** carries `reader` - `{enabled, percent_left, reads_used, reads_limit, reads_left,
-  blocked, resumes_at}` - after every read, so the page's "80% of your AI allowance left" moves
+  blocked, resumes_at, first_read_at}` - after every read, so the page's "80% of your AI allowance left" moves
   with no extra call. `percent_left` is measured over the grants that still have room (a top-up
   after a spent grant reads 100%). Used up, the route answers `limit_reached` without asking the
-  model and the page disables the button.
+  model and the page disables the button. `first_read_at` (2026-11-26, minty-shared v0.27): the
+  signed-in person's earliest answered read, any company, either reader (ISO or null) - the page
+  shows the large reading cat for 24 hours from it, the small one after; worked out from
+  `ai_read`, no column of its own. A too-large file's answer also names `max_file_mb`.
 - The in-process `RateLimiter` and `*_RATE_USER_PER_MIN`/`*_RATE_ENTITY_PER_HOUR` are gone (replaced).
 - **Production:** Vertex AI on its `global` endpoint (minty-shared v0.12; below).
 
