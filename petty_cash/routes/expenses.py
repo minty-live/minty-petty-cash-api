@@ -427,7 +427,7 @@ def extract_expense(request):
     if len(uploads) > 1:
         raise Refused("Attach one receipt at a time.", 422)
     try:
-        data, mime, _ = checked_receipt(uploads[0])
+        data, mime, _ = checked_receipt(uploads[0], to_store=False)
     except ExpenseRefused as refused:
         raise Refused(refused.message, 422) from None
     report_date = None

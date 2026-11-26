@@ -3,9 +3,10 @@
 
 The key is ``expenses/<report id>/<DD_MON_YYYY>_<ITEM>_<rounded amount>[_n].<ext>``; a name already
 in use by another attachment gets a short unique suffix (the second of two lines alike used to
-overwrite the first one's receipt). The bytes are stored exactly as uploaded, with no downsizing or
-conversion (owner, 2026-11-04), through ``minty_shared.storage.put_file``, which retries twice
-(1 s, 2 s). One client per process (``settings.S3``).
+overwrite the first one's receipt). A photo is stored compressed - a JPEG of at most 2048 px
+(``minty_shared.images.for_storage``, applied by ``checked_receipt``; the user, 2026-11-26, in
+place of the owner's 2026-11-04 "exactly as uploaded") - and a PDF as uploaded, through
+``minty_shared.storage.put_file``, which retries twice (1 s, 2 s). One client per process (``settings.S3``).
 """
 
 from __future__ import annotations
@@ -67,7 +68,9 @@ def receipt_key(report, filename: str, description: str, amount, *, file_index=N
 
 def upload_receipt(data: bytes, mime: str, report, *, filename: str, description: str, amount,
                    file_index=None) -> tuple[str, str, int]:
-    """Store a receipt's bytes as uploaded and return ``(key, mime type, size)``."""
+    """Store a receipt's bytes (``checked_receipt``'s stored copy: a photo already compressed) and
+    return ``(key, mime type, size)``. The key's extension comes from ``filename``, so a photo
+    stored as JPEG is ``.jpg``."""
     key = receipt_key(report, filename, description, amount, file_index=file_index)
     if Attachment.objects.filter(file_path=key).exists():
         stem, extension = os.path.splitext(key)

@@ -133,9 +133,9 @@ def test_a_receipt_is_read_against_the_company_s_own_lists(client, shop, model):
     assert s["amount"]["value"] == "120.00" and s["description"]["value"] == "Flyers"
     assert s["document_date"]["value"] == "2026-08-28"
     assert (s["currency"], s["entity_currency"]) == ("HKD", "HKD")
-    # the model read the bytes as sent, typed by the bytes (a PNG uploaded as image/jpeg goes as image/png)
+    # the model read the upload's own photo (not the stored copy), as its model copy: a JPEG
     [request] = model.requests
-    assert _parts(request)[1].inline_data.mime_type == "image/png"
+    assert _parts(request)[1].inline_data.mime_type == "image/jpeg"
 
 
 def test_the_read_is_labelled_for_cloud_billing(client, shop, model, monkeypatch):

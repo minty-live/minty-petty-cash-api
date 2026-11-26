@@ -45,18 +45,21 @@ def _add_heic(client, shop, data=HEIC, name="IMG_1234.HEIC", content_type="image
 
 
 @pytest.mark.parametrize("content_type", ["image/heic", "application/octet-stream", ""])
-def test_a_heic_receipt_is_stored_exactly_as_uploaded(client, shop, lists, s3, content_type):
+def test_a_heic_receipt_is_stored_as_an_upright_jpeg(client, shop, lists, s3, content_type):
+    """2026-11-26 (the user): B2 keeps photos compressed, in a type Xero takes - a HEIC is a .jpg."""
     _draft(shop)
 
     resp = _add_heic(client, shop, content_type=content_type)
 
     assert resp.status_code == 201, resp.content
     [key] = s3.objects
-    assert s3.objects[key] == HEIC and key.endswith(".heic")  # no copy, no conversion
-    assert s3.extra_args == {"ContentType": "image/heic"}
+    stored = s3.objects[key]
+    assert _jpeg_size(stored) == ("JPEG", (40, 80)) and key.endswith(".jpg")
+    assert s3.extra_args == {"ContentType": "image/jpeg"}
     row = Attachment.objects.get(file_path=key)
-    assert (row.mime_type, row.file_extension, row.file_size) == ("image/heic", "heic", len(HEIC))
-    assert resp.json()["line"]["receipts"][0]["mime_type"] == "image/heic"
+    assert (row.mime_type, row.file_extension, row.file_size) == ("image/jpeg", "jpg", len(stored))
+    assert row.original_name == "IMG_1234.jpg"
+    assert resp.json()["line"]["receipts"][0]["mime_type"] == "image/jpeg"
 
 
 def test_a_heic_that_will_not_open_is_refused_and_nothing_is_stored(client, shop, lists, s3):

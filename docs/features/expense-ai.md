@@ -33,8 +33,8 @@ shares with minty-payment-request-api's invoice reader. The answer to the web is
   value read off a receipt; `model=` is the model that answered, `attempts=` the chain). `minty_shared.model_input` makes the small copy the model reads (an
   image capped at 2048 px and saved once as JPEG; a PDF whole, every page - minty-shared v0.16, the
   user 2026-11-24; the 10 MB limit stays; an iPhone HEIC is decoded through `minty_shared.images`
-  and sent as JPEG like any photo - minty-shared v0.19). The stored receipt is never
-  changed: it reaches B2 exactly as uploaded.
+  and sent as JPEG like any photo - minty-shared v0.19). The read uses the upload itself;
+  what B2 keeps is `checked_receipt`'s compressed copy (a photo as a 2048 px JPEG, the user 2026-11-26).
 - `python manage.py expense_ai_check` - one round-trip call with a generated image, from wherever
   the code runs, to prove the configuration (the policy's models, which one answered).
 - `python manage.py ai_policy` - shows the policy and each company's reads; `--entity <id>` one

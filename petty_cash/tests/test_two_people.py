@@ -37,6 +37,7 @@ from petty_cash.days import hk, today
 from petty_cash.files import storage
 from petty_cash.services import opening as opening_service
 from petty_cash.tests.conftest import headers, make_report, make_user, url
+from petty_cash.tests.test_expenses import PNG
 
 pytestmark = pytest.mark.django_db
 D3 = today() - timedelta(days=1)
@@ -271,7 +272,7 @@ def lists(shop, monkeypatch):
 def _add_line(client, shop, user, amount):
     form = {"transaction_date": D3.isoformat(), "amount": amount, "description": "Flyers",
             "supplier_id": "con-0001", "account_id": "acc-0001",
-            "receipt": SimpleUploadedFile("slip.png", b"\x89PNG\r\n\x1a\nbytes", content_type="image/png")}
+            "receipt": SimpleUploadedFile("slip.png", PNG, content_type="image/png")}
     return client.post(url(shop.entity.id, "/reports/expenses/lines"), form, headers=headers(user.id))
 
 

@@ -59,10 +59,13 @@ class ExpenseRefused(Exception):
         self.message = message
 
 
-def checked_receipt(upload) -> tuple[bytes, str, str]:
+def checked_receipt(upload, *, to_store: bool = True) -> tuple[bytes, str, str]:
     """One uploaded receipt checked as the Expenses step takes it (Flask's ``checked_receipt``, shared
-    with the Daily Report's line edit): ``(bytes, mime judged by the bytes, original name)``, or
-    ``ExpenseRefused`` with the sentence."""
+    with the Daily Report's line edit): ``(bytes, mime judged by the bytes, name)``, or
+    ``ExpenseRefused`` with the sentence. ``to_store`` (the user, 2026-11-26): a photo comes back as
+    the copy B2 keeps - ``images.for_storage``: a JPEG of at most 2048 px named ``<stem>.jpg`` (a
+    PNG only when that is smaller), a PDF as uploaded. The AI read passes False and reads the
+    original."""
     if upload.size == 0:
         raise ExpenseRefused("That file is empty. Attach the receipt again.")
     if upload.size > settings.MAX_RECEIPT_BYTES:
@@ -71,14 +74,16 @@ def checked_receipt(upload) -> tuple[bytes, str, str]:
     mime = storage.sniff_mime(data[:16])
     if mime is None:
         raise ExpenseRefused("Attach a PDF, JPEG, PNG or HEIC file.")
-    if images.is_heif(mime):
-        # kept as HEIC (the user, 2026-11-24), so it must open: it is made JPEG later to show or publish
-        try:
+    name = upload.name
+    try:
+        if to_store:
+            data, mime, name = images.for_storage(data, mime, name or "")
+        elif images.is_heif(mime):
             images.check_decodes(data)
-        except images.ImageError as exc:
-            logger.warning("A HEIC receipt that won't open was refused (%s bytes): %s", len(data), exc)
-            raise ExpenseRefused(PHOTO_WONT_OPEN) from None
-    return data, mime, upload.name
+    except images.ImageError as exc:
+        logger.warning("A %s receipt that won't open was refused (%s bytes): %s", mime, len(data), exc)
+        raise ExpenseRefused(PHOTO_WONT_OPEN) from None
+    return data, mime, name
 
 
 def public_id(row: AccountInfo | XeroContactSync) -> str:

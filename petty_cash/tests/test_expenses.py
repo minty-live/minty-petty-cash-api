@@ -42,8 +42,22 @@ from petty_cash.tests.conftest import (
 
 pytestmark = pytest.mark.django_db
 D3 = today() - timedelta(days=1)
-PNG = b"\x89PNG\r\n\x1a\n" + b"small-png-bytes"
-JPEG = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
+
+
+def _tiny(fmt: str, **save) -> bytes:
+    """A real 8x8 image: photos are decoded when stored (the user, 2026-11-26). This small, a PNG and
+    a quality-50 JPEG are kept byte for byte - re-saving would not make them smaller."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    buf = BytesIO()
+    Image.new("RGB", (8, 8), (30, 140, 200)).save(buf, format=fmt, **save)
+    return buf.getvalue()
+
+
+PNG = _tiny("PNG")
+JPEG = _tiny("JPEG", quality=50)
 
 
 class FakeS3:
@@ -253,8 +267,13 @@ def _big_png(side=800) -> bytes:
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
 
 
-def test_a_large_receipt_is_stored_exactly_as_uploaded(client, shop, lists, s3):
-    """2026-11-04 (owner): no downsizing and no conversion - B2 holds the person's file byte for byte."""
+def test_a_photo_png_is_stored_as_a_smaller_jpeg(client, shop, lists, s3):
+    """2026-11-26 (the user, replacing the owner's 2026-11-04 "exactly as uploaded"): B2 keeps a
+    photo as a JPEG of at most 2048 px (minty-shared-py tests the cap) - smaller, and what Xero gets."""
+    from io import BytesIO
+
+    from PIL import Image
+
     _draft(shop)
     png = _big_png()
     assert len(png) > 1024 * 1024
@@ -266,11 +285,42 @@ def test_a_large_receipt_is_stored_exactly_as_uploaded(client, shop, lists, s3):
 
     assert resp.status_code == 201, resp.content
     [key] = s3.objects
-    assert s3.objects[key] == png and key.endswith(".png")
-    assert s3.extra_args == {"ContentType": "image/png"}
+    stored = s3.objects[key]
+    with Image.open(BytesIO(stored)) as img:
+        assert (img.format, img.size) == ("JPEG", (800, 800))
+    assert len(stored) < len(png) and key.endswith(".jpg")
+    assert s3.extra_args == {"ContentType": "image/jpeg"}
     row = Attachment.objects.get(file_path=key)
-    assert row.mime_type == "image/png" and row.file_size == len(png)
-    assert resp.json()["line"]["receipts"][0]["mime_type"] == "image/png"
+    assert (row.mime_type, row.file_size, row.original_name) == ("image/jpeg", len(stored), "big-slip.jpg")
+    assert resp.json()["line"]["receipts"][0]["mime_type"] == "image/jpeg"
+
+
+def test_a_pdf_receipt_is_stored_as_uploaded(client, shop, lists, s3):
+    _draft(shop)
+    pdf = b"%PDF-1.7\n" + b"x" * 5000
+    form = {"transaction_date": D3.isoformat(), "amount": "12.40", "description": "Flyers",
+            "supplier_id": "con-0001", "account_id": "acc-0001",
+            "receipt": SimpleUploadedFile("invoice.pdf", pdf, content_type="application/pdf")}
+
+    resp = client.post(url(shop.entity.id, "/reports/expenses/lines"), form, headers=headers(shop.owner.id))
+
+    assert resp.status_code == 201, resp.content
+    [key] = s3.objects
+    assert s3.objects[key] == pdf and key.endswith(".pdf")
+    assert Attachment.objects.get(file_path=key).mime_type == "application/pdf"
+
+
+def test_a_photo_that_will_not_open_is_refused_and_nothing_is_stored(client, shop, lists, s3):
+    _draft(shop)
+    form = {"transaction_date": D3.isoformat(), "amount": "12.40", "description": "Flyers",
+            "supplier_id": "con-0001", "account_id": "acc-0001",
+            "receipt": SimpleUploadedFile("a.jpg", b"\xff\xd8\xff\xe0 not a photo", content_type="image/jpeg")}
+
+    resp = client.post(url(shop.entity.id, "/reports/expenses/lines"), form, headers=headers(shop.owner.id))
+
+    assert resp.status_code == 422
+    assert resp.json()["error"] == "This photo can't be opened. Attach it again as a JPEG or PNG."
+    assert s3.objects == {}
 
 
 def test_two_lines_alike_keep_their_own_receipts(client, shop, lists, s3):
