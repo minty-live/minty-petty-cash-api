@@ -88,6 +88,26 @@ def test_a_supplier_is_kept_in_minty_with_no_xero_call(client, minty, monkeypatc
     assert XeroContactSync.objects.filter(entity_id=minty.entity.id).count() == 1
 
 
+def test_a_supplier_added_while_xero_is_off_is_marked_for_the_reconnect(client, shop, monkeypatch):
+    """A disconnected company is Minty-only (the user, 2026-11-27): a supplier it adds is its own row,
+    marked (``minty_changed_at``) so the reconnect's matching asks about it; one that never had Xero
+    marks nothing."""
+    monkeypatch.setattr("requests.post", lambda *a, **k: (_ for _ in ()).throw(AssertionError("asked Xero")))
+    Entity.objects.filter(id=shop.entity.id).update(xero_org_id="11111111-2222-3333-4444-555555555555",
+                                                    status="disconnected", setup_mode="xero")
+    resp = client.post(url(shop.entity.id, "/suppliers"), {"name": "Corner Bakery"},
+                       content_type="application/json", headers=headers(shop.owner.id))
+    assert resp.status_code == 201
+    row = XeroContactSync.objects.get(id=resp.json()["id"])
+    assert (row.xero_contact_id, row.minty_changed_at is not None) == (None, True)
+
+
+def test_a_supplier_of_a_company_that_never_had_xero_is_not_marked(client, minty):
+    resp = client.post(url(minty.entity.id, "/suppliers"), {"name": "Corner Bakery"},
+                       content_type="application/json", headers=headers(minty.owner.id))
+    assert XeroContactSync.objects.get(id=resp.json()["id"]).minty_changed_at is None
+
+
 def test_publishing_is_refused_before_any_xero_call(client, minty, monkeypatch):
     monkeypatch.setattr(pub, "xero_token", lambda entity_id: (_ for _ in ()).throw(AssertionError("asked Xero")))
     report = make_report(minty.entity, dt.date(2026, 11, 2), created_by=minty.owner.id)

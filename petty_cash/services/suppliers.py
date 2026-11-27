@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 
 from django.db import IntegrityError, transaction
+from django.utils import timezone
 from minty_db.models import Entity, XeroContact, XeroContactSync
 from minty_shared import names
 
@@ -50,12 +51,14 @@ def _held(entity_id, name: str) -> XeroContactSync | None:
     return next((c for c in suppliers(entity_id) if names.same_name(c.name, name)), None)
 
 
-def _kept_in_minty(entity_id, name: str) -> XeroContactSync:
+def _kept_in_minty(entity: Entity, name: str) -> XeroContactSync:
     """No live connection (owner, 2026-11-12; was: only a company keeping its books in Minty): the
-    supplier is the company's own row, no Xero id."""
-    row = XeroContactSync.objects.create(entity_id=entity_id, name=" ".join(name.split())[:MAX_NAME],
-                                         source="user")
-    logger.info("Supplier %s kept in Minty for company %s", row.id, entity_id)
+    supplier is the company's own row, no Xero id. One holding an organisation (disconnected) marks it
+    (``minty_changed_at``; the user, 2026-11-27), so the reconnect's matching asks about it."""
+    row = XeroContactSync.objects.create(entity_id=entity.id, name=" ".join(name.split())[:MAX_NAME],
+                                         source="user",
+                                         minty_changed_at=timezone.now() if entity.xero_org_id else None)
+    logger.info("Supplier %s kept in Minty for company %s", row.id, entity.id)
     return row
 
 
@@ -143,7 +146,7 @@ def create_supplier(entity_id, name: str) -> XeroContactSync:
     if back is not None:
         return back
     if offline:
-        return _kept_in_minty(entity_id, name)
+        return _kept_in_minty(entity, name)
     copy = next((c for c in XeroContact.objects.filter(entity_id=entity_id, xero_org_id=str(entity.xero_org_id),
                                                        status="ACTIVE")
                  if names.same_name(c.name, name)
