@@ -18,7 +18,7 @@ from petty_cash.tests.conftest import headers, url
 from petty_cash.tests.test_expense_extract import FakeResponse, _reply, model  # noqa: F401 - the model fixture
 from petty_cash.tests.test_expenses import D3, PNG, _add, _draft, _line, lists, s3  # noqa: F401 - fixtures
 
-pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("lists")]
+pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("lists", "on_trial")]
 
 RECEIPT_DAY = D3 - timedelta(days=2)
 

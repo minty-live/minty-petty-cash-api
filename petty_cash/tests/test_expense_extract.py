@@ -19,16 +19,44 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection, connections
 from django.utils import timezone
 from minty_db.enums import EntityRole
-from minty_db.models import AccountInfo, AiGrant, AiPolicy, AiRead, UserEntity, XeroContactSync
+from minty_db.models import (
+    AccountInfo,
+    AiGrant,
+    AiPolicy,
+    AiRead,
+    BillingPolicy,
+    EntityBillingGroup,
+    EntityModuleSubscription,
+    PayerBillingGroup,
+    UserEntity,
+    UserStripeCustomer,
+    XeroContactSync,
+)
 from minty_shared import ai, ai_prompt
 from minty_shared.django import ai_allowance
+from minty_shared.periods import period_containing, prorate
 
 from petty_cash.services import receipt_reader
 from petty_cash.tests.conftest import WEB, headers, make_entity, make_user, url
 from petty_cash.tests.test_expenses import JPEG, PNG, lists  # noqa: F401 - the lists fixture
 
-# Every test runs on the shop with its lists (test_expenses.lists): two suppliers, one account on.
-pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("lists")]
+# Every test runs on the shop with its lists (test_expenses.lists): two suppliers, one account on,
+# and the shop on its Petty Cash trial, so its AI trial runs (the user, 2026-11-27).
+pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("lists", "on_trial")]
+
+
+def _paying(shop, *, anchor, paid_through, phase="active", first_billed=None):
+    """The shop's trial converted: a payer with its anchor, the billing account's paid_through,
+    the module active (subscription-api's rows)."""
+    UserStripeCustomer.objects.create(user_id=shop.owner.id, stripe_customer_id=f"cus_{shop.owner.id.hex[:12]}",
+                                      anchor_at=anchor)
+    group = PayerBillingGroup.objects.create(payer_user_id=shop.owner.id, stripe_payment_method_id="pm_test",
+                                             paid_through=paid_through)
+    EntityBillingGroup.objects.create(entity_id=shop.entity.id, payer_user_id=shop.owner.id,
+                                      billing_group_id=group.id, source="chosen")
+    EntityModuleSubscription.objects.filter(entity_id=shop.entity.id).update(
+        phase=phase, payer_user_id=shop.owner.id, first_billed_at=first_billed or anchor,
+        app_access_until=None)
 
 
 def _reply(**over) -> str:
@@ -510,24 +538,140 @@ def test_the_check_command_fails_loudly_when_the_model_does_not_answer(model):
 # --- the allowance: each company's grants, shared with Payment Request (owner, 2026-11-18) ------
 
 
-def test_the_first_read_gives_the_one_time_grant_and_a_used_up_grant_stops_reading(client, shop, model):
+def test_the_first_read_gives_the_ai_trial_and_a_used_up_trial_stops_reading(client, shop, model):
     first = _extract(client, shop).json()["reader"]    # 5,700 of 10,000
     second = _extract(client, shop).json()["reader"]   # 11,400: used up (the crossing read finishes)
     refused = _extract(client, shop).json()
 
     assert (first["percent_left"], first["blocked"]) == (43, False)
-    assert (second["percent_left"], second["blocked"]) == (0, True)
+    assert (second["percent_left"], second["blocked"], second["resumes_at"]) == (0, True, None)  # not paying
     assert (refused["suggestions"], refused["reason"]) == (None, "limit_reached")
     assert len(model.requests) == 2
     [grant] = AiGrant.objects.filter(entity_id=shop.entity.id)
-    assert (grant.source, grant.tokens_total, grant.granted_by) == ("default", 10000, "ai_policy")
+    assert (grant.source, grant.tokens_total, grant.granted_by) == ("trial", 10000, "ai_policy")
     assert AiRead.objects.filter(entity_id=shop.entity.id, grant_id=grant.id).count() == 2
 
 
-def test_the_default_grant_is_given_once_ever(client, shop, model):
+def test_the_ai_trial_runs_30_days_from_the_first_module_trial(client, shop, model, on_trial):
+    _policy(default_grant={"tokens": 280000, "days": 30})
+
+    _extract(client, shop)
+
+    [grant] = AiGrant.objects.filter(entity_id=shop.entity.id)
+    on_trial.refresh_from_db()
+    assert grant.expires_at == on_trial.created_at + timedelta(days=30)  # not 30 days from the read
+
+
+def test_the_ai_trial_is_given_once_ever(client, shop, model):
     for _ in range(3):
         _extract(client, shop)
     assert AiGrant.objects.filter(entity_id=shop.entity.id).count() == 1
+
+
+def test_a_trial_window_already_over_gives_no_trial(client, shop, model, on_trial):
+    EntityModuleSubscription.objects.filter(id=on_trial.id).update(
+        phase="expired", created_at=timezone.now() - timedelta(days=45))
+    _policy(default_grant={"tokens": 280000, "days": 30})
+
+    assert _extract(client, shop).json()["reason"] == "limit_reached"
+    assert not AiGrant.objects.exists() and model.requests == []
+
+
+# --- after the trial: one grant per billing period (the user, 2026-11-27) ----------------------
+
+
+def _after_trial(shop, *, days_left: int = 18):
+    """The shop's AI trial ended ``30 - days_left`` days into this billing period, and it pays."""
+    now = timezone.now()
+    anchor = now - timedelta(days=60)
+    period = period_containing(anchor, now)
+    trial_end = period.end - timedelta(days=days_left)
+    AiGrant.objects.create(entity_id=shop.entity.id, tokens_total=280000, source="trial",
+                           expires_at=min(trial_end, now - timedelta(minutes=1)), granted_by="ai_policy")
+    _paying(shop, anchor=anchor, paid_through=period.end)
+    _policy(default_grant={"tokens": 280000, "days": 30}, cycle_tokens=280000)
+    return period, min(trial_end, now - timedelta(minutes=1))
+
+
+def test_after_the_trial_a_paying_company_gets_this_period_s_grant_prorated_like_billing(client, shop, model):
+    period, trial_end = _after_trial(shop)
+
+    body = _extract(client, shop).json()
+
+    assert body["reason"] is None
+    cycle = AiGrant.objects.get(entity_id=shop.entity.id, source="cycle")
+    assert cycle.tokens_total == prorate(280000, period, trial_end)
+    assert (cycle.expires_at, cycle.granted_by) == (period.end, "ai_policy")
+    assert AiRead.objects.get(entity_id=shop.entity.id).grant_id == cycle.id
+
+
+def test_this_period_s_grant_is_given_once_and_resumes_at_the_next_period_when_used_up(client, shop, model):
+    period, _ = _after_trial(shop)
+    _policy(cycle_tokens=6000)  # one read's worth, before proration
+
+    _extract(client, shop)
+    used_up = _extract(client, shop).json()
+
+    assert AiGrant.objects.filter(entity_id=shop.entity.id, source="cycle").count() == 1
+    assert used_up["reason"] == "limit_reached"
+    assert used_up["reader"]["resumes_at"] == period.end.isoformat()  # "paused until" the next period
+
+
+def test_no_period_grant_once_the_subscription_has_lapsed(client, shop, model):
+    _after_trial(shop)
+    EntityModuleSubscription.objects.filter(entity_id=shop.entity.id).update(phase="cancelled")
+
+    body = _extract(client, shop).json()
+
+    assert (body["reason"], body["reader"]["resumes_at"]) == ("limit_reached", None)
+    assert not AiGrant.objects.filter(source="cycle").exists()
+
+
+def test_a_past_due_company_keeps_reading_through_the_grace_only(client, shop, model):
+    _after_trial(shop)
+    BillingPolicy.objects.create(id=1, past_due_window_days=15)  # seed_catalogue.sql's
+    PayerBillingGroup.objects.update(paid_through=timezone.now() - timedelta(days=20))
+    EntityModuleSubscription.objects.filter(entity_id=shop.entity.id).update(phase="past_due")
+    assert _extract(client, shop).json()["reason"] == "limit_reached"
+
+    PayerBillingGroup.objects.update(paid_through=timezone.now() - timedelta(days=3))
+    assert _extract(client, shop).json()["reason"] is None
+
+
+def test_the_grant_that_expires_soonest_is_charged_first_and_a_top_up_carries_over(client, shop, model):
+    _policy(default_grant={"tokens": 280000, "days": 30})
+    top_up = ai_allowance.give_grant(shop.entity.id, ai_allowance.GrantSpec(tokens=40000), granted_by="ops")
+
+    _extract(client, shop)
+
+    [trial] = AiGrant.objects.filter(entity_id=shop.entity.id, source="trial")
+    assert AiRead.objects.get(entity_id=shop.entity.id).grant_id == trial.id  # not the older top-up
+    assert not AiRead.objects.filter(grant_id=top_up).exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_two_services_reading_at_once_give_one_period_grant(shop, ai_policy, on_trial):
+    if connection.vendor != "postgresql":
+        pytest.skip("the advisory lock is Postgres's; SQLite serialises writers itself")
+    _after_trial(shop)
+    policy = ai_allowance.load_policy()
+    results, start = [], threading.Barrier(2)
+
+    def reserve(module):
+        start.wait()
+        try:
+            results.append(ai_allowance.reserve(shop.entity.id, shop.owner.id, module, policy)[0])
+        finally:
+            connections.close_all()
+
+    threads = [threading.Thread(target=reserve, args=(m,)) for m in ("petty_cash", "payment_request")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert all(r is not None for r in results)
+    assert AiGrant.objects.filter(entity_id=shop.entity.id, source="cycle").count() == 1
 
 
 def test_a_top_up_lets_a_used_up_company_read_again_and_is_charged_next(client, shop, model):
@@ -583,6 +727,7 @@ def test_nothing_usable_is_still_a_read(client, shop, model):
 
 
 def test_payment_request_reads_use_the_same_grants(client, shop, model):
+    _policy(default_grant=None)  # this grant alone
     grant = ai_allowance.give_grant(shop.entity.id, ai_allowance.GrantSpec(tokens=10000))
     AiRead.objects.create(entity_id=shop.entity.id, grant_id=grant, module="payment_request", status="ok",
                           tokens_in=9000, tokens_out=500)
@@ -697,7 +842,7 @@ def test_two_reads_with_room_for_one_let_exactly_one_through(shop, ai_policy):
 
     assert sorted(r is None for r in results) == [False, True]
     assert AiRead.objects.filter(entity_id=shop.entity.id).count() == 1
-    assert AiGrant.objects.filter(entity_id=shop.entity.id).count() == 1  # the default given once
+    assert AiGrant.objects.filter(entity_id=shop.entity.id).count() == 1  # the trial given once
 
 
 # --- the operator's command ---------------------------------------------------------------------
@@ -717,7 +862,21 @@ def test_the_policy_command_changes_models_default_grant_and_caps_after_checking
     assert ai_policy.updated_by == "ops"
     out = capsys.readouterr().out
     assert "models        : gemini-3.5-flash-lite -> gemini-3.8-flash" in out
-    assert 'default grant : {"tokens": 50000, "days": 90}' in out
+    assert 'trial grant   : {"tokens": 50000, "days": 90}' in out
+
+
+def test_the_policy_command_sets_each_period_s_tokens_or_none(ai_policy, capsys):
+    from django.core.management import CommandError, call_command
+
+    call_command("ai_policy", "--set-cycle-tokens", "280000", "--by", "ops")
+    ai_policy.refresh_from_db()
+    assert ai_policy.cycle_tokens == 280000
+    assert "period grant  : 280000 tokens" in capsys.readouterr().out
+    with pytest.raises(CommandError, match="cycle_tokens must be a whole number"):
+        call_command("ai_policy", "--set-cycle-tokens", "0")
+    call_command("ai_policy", "--set-cycle-tokens", "null")
+    ai_policy.refresh_from_db()
+    assert ai_policy.cycle_tokens is None
 
 
 def test_the_policy_command_sets_a_price_and_names_a_model_only_with_one(ai_policy, capsys):

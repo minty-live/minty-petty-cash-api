@@ -52,20 +52,35 @@ Request together, and the models are settings - all in minty-db (v0.13), changed
 minty-petty-cash-api's `python manage.py ai_policy`, never a release:
 
 - `ai_grant`: an allowance given to one company - `tokens_total` and/or `reads_total`, an optional
-  `expires_at`, `source` (`default` | `manual`), who gave it and why. A top-up is another grant. A
-  used-up or expired grant is spent and stays as the record.
-- `ai_policy` (one row): `primary_model`, `backup_model`, `default_grant` - the one-time grant every
-  company is given automatically on its first read (`{"tokens": n, "reads": n, "days": n}`; NULL =
-  only grants given by hand) - and `limit_rules`, optional extra caps over every company
-  (`{"reads": n, "tokens": n, "period_days": n}`, all applying; a rolling window, e.g. a daily
-  throttle). The preview: `default_grant {"tokens": 20000}` (about four to five receipts; a read is
-  ~3,500-5,700 tokens), no extra caps. The default grant is given once per company, ever
-  (`uq_ai_grant_one_default`): a used-up company stays used up until it is given another grant
-  (`manage.py ai_policy --grant <company id> --tokens 50000 [--reads n] [--days n] [--note ...]`,
-  or minty-web's Select Company in its **AI allowances** mode - every superuser; minty-accounts-api's
-  `docs/features/ai-allowances.md`).
+  `expires_at`, `source` (`trial` | `cycle` | `manual`, and `default` for the one-time grant before
+  2026-11-27), who gave it and why. A top-up is another grant. A used-up or expired grant is spent
+  and stays as the record.
+- **AI is its own product on the subscription (the user, 2026-11-27; minty-db v0.22, minty-shared
+  v0.28):**
+  - `ai_policy.default_grant` is the company's **30-day AI trial** (`source='trial'`, once ever,
+    `uq_ai_grant_one_trial`): it starts with the company's first module subscription (its trial, or a
+    purchase with none) and is written at the first read inside that window. Every company that
+    existed on 2026-11-27 got a fresh trial from that day (minty-db's `2026-11-27_ai_trial_reset.sql`).
+  - `ai_policy.cycle_tokens` is **one grant per billing period after it** (`source='cycle'`): the
+    period from the payer's anchor, expiring at its end, no rollover. The first is prorated exactly
+    like billing (elapsed seconds, half away from zero; 18 of 30 days left = 168,000 of 280,000) from
+    the trial's end or the company's first charge. Only while a paid module's access stands
+    (`app_access_until`, else `paid_through`, plus the past-due window): none once the subscription
+    has ended or its grace is over.
+  - Live: trial 280,000 tokens for 30 days; 280,000 a period (about HK$20 of Flash-Lite).
+  - A used-up company reads "AI reading is paused until {date}" when a grant will come by itself
+    (`resumes_at` = the next period's start, or the trial's end for a paying company), else "Your
+    company has used its AI allowance".
+  - Grants by hand (`manage.py ai_policy --grant <company id> --tokens 50000 [--reads n] [--days n]
+    [--note ...]`, or minty-web's Select Company in its **AI allowances** mode - every superuser;
+    minty-accounts-api's `docs/features/ai-allowances.md`) are top-ups.
+- `ai_policy` (one row) also holds `primary_model`, `backup_model` and `limit_rules`, optional extra
+  caps over every company (`{"reads": n, "tokens": n, "period_days": n}`, all applying; a rolling
+  window, e.g. a daily throttle; live: none). `manage.py ai_policy --set-default-grant JSON` and
+  `--set-cycle-tokens N` change the trial and the period's tokens (`null` = none).
 - `ai_read`: one row per read asked for - `pending`, then `ok` or `failed` - charged to one grant
-  (the oldest with room), with the module, the model that answered, the chain tried
+  (the live one with room that expires soonest, no expiry last, so a top-up carries over), with the
+  module, the model that answered, the chain tried
   (`gemini-3.5-flash-lite:timeout>gemini-3.8-flash:ok`) and every attempt's tokens.
 - **Cost per company in Google's own figures (the user, 2026-11-24; minty-shared-py v0.20):** every
   Vertex call (each model, each retry) carries the labels `env` (`production`/`development`, from
@@ -87,8 +102,8 @@ minty-petty-cash-api's `python manage.py ai_policy`, never a release:
   that crosses it finishes. A refusal before the model is asked (switched off, file too large, no
   accounts or suppliers) uses nothing.
 - **How:** `minty_shared.django.ai_allowance` (minty-shared-py v0.7) - `reserve` under a per-company
-  Postgres advisory lock (it gives the default grant on the first read; two clicks with room for
-  one: one passes), `finish`, `give_grant`, `reader_status`. A missing or unusable policy row turns
+  Postgres advisory lock (it gives the trial or this period's grant when due; two clicks with room
+  for one: one passes; two services at once make one period grant), `finish`, `give_grant`, `reader_status`. A missing or unusable policy row turns
   reading OFF and logs an error - never a guessed limit.
 - **Failover:** the engine tries `primary_model`, then `backup_model` when the first times out,
   errors, is rate-limited, truncates or replies unusably (not on a safety block). Only a provider in

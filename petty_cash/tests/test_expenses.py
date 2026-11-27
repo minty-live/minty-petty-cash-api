@@ -188,7 +188,8 @@ def test_a_line_shows_its_account_and_supplier_as_the_chart_has_them_now(client,
 
 
 @pytest.mark.parametrize(("switch", "enabled"), [(True, True), (False, False), (None, False)])
-def test_the_page_says_whether_the_receipt_reader_is_on(client, shop, lists, ai_policy, switch, enabled):
+def test_the_page_says_whether_the_receipt_reader_is_on(client, shop, lists, ai_policy, on_trial, switch,
+                                                          enabled):
     """The app offers "Read with AI" only when ``ai_policy.receipt_reader_on`` is on (owner, 2026-11-20;
     off by the column's default), with the company's reads left (shared with Payment Request); a
     switched-off reader sends no count. The invoice reader's switch is not this page's."""

@@ -24,6 +24,7 @@ from minty_db.models import (
     Entity,
     EntityFunction,
     EntityFunctionMap,
+    EntityModuleSubscription,
     User,
     UserEntity,
 )
@@ -158,6 +159,22 @@ MODEL_PRICES = {
     "gemini-3.5-flash-lite": {"input": 0.30, "output": 2.50, "cached_input": 0.03},
     "gemini-3.1-pro-preview": {"input": 2.00, "output": 12.00, "cached_input": 0.20},
 }
+
+
+@pytest.fixture
+def on_trial(shop) -> EntityModuleSubscription:
+    """The shop started its Petty Cash trial yesterday (subscription-api's row), so its AI trial
+    runs (the user, 2026-11-27: the AI trial starts with the company's first module trial)."""
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    started = timezone.now() - timedelta(days=1)
+    row = EntityModuleSubscription.objects.create(
+        entity_id=shop.entity.id, function_code="PETTY_CASH", phase="trial",
+        trial_end=started + timedelta(days=30), app_access_until=started + timedelta(days=30))
+    EntityModuleSubscription.objects.filter(id=row.id).update(created_at=started)
+    return row
 
 
 @pytest.fixture
