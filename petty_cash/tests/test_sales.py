@@ -281,6 +281,21 @@ def test_a_blank_or_zero_method_writes_no_row(client, shop, methods):
     assert (row.cashsale_total, row.nocashsale_total, row.total_sales) == (0, 25, 25)
 
 
+def test_a_companys_own_deliveroo_is_listed_and_saved(client, shop, methods):
+    # Minty's Deliveroo row is gone (2026-11-27): one a company adds is an ordinary method.
+    own = SaleInfo.objects.create(sale_name="Deliveroo", value_name="deliveroo_sales", type=SaleType.DELIVERY,
+                                  display_order=4, entity_id=shop.entity.id)
+    EntitySaleSetting.objects.create(entity_id=shop.entity.id, sale_id=own.id, is_active=True, display_order=4)
+    draft = _draft(shop)
+
+    assert "Deliveroo" in [m["name"] for m in _get(client, shop).json()["methods"]]
+    resp = _put(client, shop, _body(amounts={"deliveroo_sales": 12}))
+
+    assert resp.status_code == 200, resp.content
+    assert _amounts(draft) == {"deliveroo_sales": Decimal("12.00")}
+    assert Report.objects.get(id=draft.id).nocashsale_total == 12
+
+
 def test_clearing_a_saved_amount_deletes_its_row(client, shop, methods):
     draft = _draft(shop)
     _put(client, shop, _body(cash_sales=40, amounts={"visa_sales": 25, "keeta_sales": 10}))

@@ -28,9 +28,6 @@ from petty_cash.services.reports import (
 #: Cash is the sales-method catalogue's ``other`` row whose ``value_name`` is this.
 CASH_VALUE_NAME = "cash_sales"
 
-#: A method the page lists but the save has always skipped (the old Deliveroo column).
-SKIPPED = "deliveroo_sales"
-
 #: Which lists the pages show (owner, 2026-11-11; onboarding's step 5 asks the same):
 #: Restaurant & Food takes Electronic and Delivery; a retail shop, a service or a general business
 #: takes one Non-cash list (its methods are stored as electronic). A company from before onboarding
@@ -187,7 +184,7 @@ def save_sales(entity_id, user, draft: Report, amounts: dict, action_type: str, 
     parts, non_cash = sales_parts(entity_id), sales_groups(entity_id) == "non_cash"
     for method in sales_methods(entity_id):
         field = method["value_name"]
-        if not field or field == SKIPPED or not shown({**method, "non_cash": non_cash}, parts):
+        if not field or not shown({**method, "non_cash": non_cash}, parts):
             continue
         amount = cents(amounts.get(field) or 0)
         if field != CASH_VALUE_NAME:
@@ -229,14 +226,14 @@ def save_sales(entity_id, user, draft: Report, amounts: dict, action_type: str, 
 def report_methods(entity_id, report_id) -> list[dict]:
     """``page_methods`` for a report already filled in: the methods the company has on, then any
     method switched off or removed since that still holds an amount on this report (a submitted
-    report keeps what it said). Deliveroo and Cash stay out (Flask's ``report_methods``)."""
+    report keeps what it said). Cash stays out (Flask's ``report_methods``)."""
     methods = page_methods(entity_id, report_id)
     listed = {m["sale_id"] for m in methods}
     rows = ReportSale.objects.filter(report_id=report_id).values_list("sale_id", "amount")
     catalogue = {s.id: s for s in SaleInfo.objects.filter(id__in=[sale_id for sale_id, _ in rows])}
     for sale_id, amount in rows:
         sale = catalogue.get(sale_id)
-        if sale is None or str(sale_id) in listed or not amount or sale.value_name in (SKIPPED, CASH_VALUE_NAME):
+        if sale is None or str(sale_id) in listed or not amount or sale.value_name == CASH_VALUE_NAME:
             continue
         methods.append({"sale_id": str(sale_id), "name": sale.sale_name, "value_name": sale.value_name,
                         "type": str(sale.type), "amount": amount})
