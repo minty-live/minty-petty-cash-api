@@ -25,7 +25,7 @@ from minty_shared import names
 from core.xero_tokens import XeroTokenUnavailable, xero_token
 from petty_cash.services.expenses import org_scope, suppliers
 from petty_cash.services.xero_settings import minty_on_its_own
-from petty_cash.xero.contacts import XeroContactUnavailable, found_or_made
+from petty_cash.xero.contacts import XeroContactUnavailable, found_or_made, take_xero_name
 
 logger = logging.getLogger("petty-cash-api")
 
@@ -101,9 +101,9 @@ def _brought_back(entity: Entity, name: str, offline: bool) -> XeroContactSync |
     return row
 
 
-def _found_or_made(entity: Entity, name: str) -> str:
-    """The ContactID of Xero's contact of ``name`` (searched live, case, spaces and punctuation ignored),
-    else of one made there as a supplier (C5). Raises ``SupplierRefused``."""
+def _found_or_made(entity: Entity, name: str) -> tuple[str, str]:
+    """``(ContactID, Xero's name)`` of Xero's contact of ``name`` (searched live, case, spaces and
+    punctuation ignored), else of one made there as a supplier (C5). Raises ``SupplierRefused``."""
     token = _access_token(entity.id)
     try:
         made = found_or_made(token, entity.xero_org_id, " ".join(name.split()))
@@ -111,19 +111,20 @@ def _found_or_made(entity: Entity, name: str) -> str:
         if unavailable.status in (401, 403):
             raise SupplierRefused(NO_ENTRY) from None
         raise SupplierRefused(NO_ID if unavailable.no_id else NOT_ADDED) from None
-    return made["ContactID"]
+    return made["ContactID"], made.get("Name") or name
 
 
 def _put_in_xero(entity: Entity, row: XeroContactSync) -> XeroContactSync:
     """The company's own supplier, kept only in Minty, added again while live (C5): linked to Xero's
     contact of its name, else made there. If another of the company's rows already holds that Xero
     contact, that row is the supplier (never a second link to one contact)."""
-    xero_contact_id = _found_or_made(entity, row.name)
+    xero_contact_id, xero_name = _found_or_made(entity, row.name)
     holder = XeroContactSync.objects.filter(entity_id=entity.id, xero_contact_id=xero_contact_id).first()
     if holder is not None:
         return holder
     XeroContactSync.objects.filter(id=row.id).update(xero_contact_id=xero_contact_id, xero_org_id=entity.xero_org_id)
     row.xero_contact_id, row.xero_org_id = xero_contact_id, entity.xero_org_id
+    take_xero_name(entity.id, row, xero_name)
     logger.info("Supplier %s kept in Minty is now in Xero for company %s", row.id, entity.id)
     return row
 
@@ -153,16 +154,18 @@ def create_supplier(entity_id, name: str) -> XeroContactSync:
                  and not XeroContactSync.objects.filter(entity_id=entity_id, xero_contact_id=c.xero_guid).exists()),
                 None)
     if copy is not None:
+        # Xero's name at the link (the user, 2026-11-27)
         row = XeroContactSync.objects.create(entity_id=entity_id, xero_contact_id=copy.xero_guid,
-                                             xero_org_id=entity.xero_org_id, name=" ".join(name.split())[:MAX_NAME],
+                                             xero_org_id=entity.xero_org_id,
+                                             name=(copy.name or " ".join(name.split()))[:MAX_NAME],
                                              xero_contact_link_id=copy.id)
         logger.info("Supplier %s linked to Xero's contact of its name for company %s", row.id, entity_id)
         return row
     # Added while connected, it is made in both (owner's decisions doc C5, 2026-11-19): Xero's contact
     # of the name (searched live, case, spaces and punctuation ignored) is linked, else it is made there as a
     # supplier - never a twin in Xero.
-    xero_contact_id = _found_or_made(entity, name)
-    created_name = " ".join(name.split())[:MAX_NAME]
+    xero_contact_id, xero_name = _found_or_made(entity, name)
+    created_name = (xero_name or " ".join(name.split()))[:MAX_NAME]  # Xero's name (the user, 2026-11-27)
 
     with transaction.atomic():
         row = XeroContactSync.objects.filter(entity_id=entity_id, xero_contact_id=xero_contact_id).first()

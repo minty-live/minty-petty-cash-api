@@ -192,6 +192,43 @@ def test_live_a_supplier_kept_only_in_minty_is_put_in_xero_too_never_a_second(cl
     assert [s["params"]["searchTerm"] for s in http.searched] == ["Corner"]  # its longest word (the first of equals)
 
 
+def test_a_minty_supplier_put_in_xero_takes_xeros_name_and_its_bills_follow(client, connected, http):
+    """C5 with Xero's contact named another way: the supplier takes Xero's name at the link and the
+    bills on it follow at once (the user, 2026-11-27)."""
+    from minty_db.models import Bill
+
+    own = XeroContactSync.objects.create(entity_id=connected.entity.id, name="7 Eleven", source="user")
+    bill = Bill.objects.create(entity_id=connected.entity.id, reference="B-7", contact_id=own.id,
+                               contact_name="7 Eleven")
+    http.found = [{"ContactID": "con-7", "Name": "7-Eleven", "ContactStatus": "ACTIVE"}]
+
+    assert _post(client, connected, {"name": "7 eleven"}).json()["id"] == "con-7"
+    own.refresh_from_db()
+    assert (own.xero_contact_id, own.name) == ("con-7", "7-Eleven")
+    assert Bill.objects.get(id=bill.id).contact_name == "7-Eleven"
+
+
+def test_a_publish_puts_a_minty_supplier_in_xero_under_xeros_name(connected, monkeypatch):
+    """C1 at publish: the supplier made in Minty is linked to Xero's contact of its name - and takes
+    that name (the user, 2026-11-27)."""
+    from types import SimpleNamespace
+
+    from minty_db.models import Bill
+
+    from petty_cash.xero import contacts
+
+    own = XeroContactSync.objects.create(entity_id=connected.entity.id, name="7 Eleven", source="user")
+    bill = Bill.objects.create(entity_id=connected.entity.id, reference="B-7", contact_id=own.id,
+                               contact_name="7 Eleven")
+    monkeypatch.setattr(contacts, "found_or_made", lambda token, org, name: {"ContactID": "con-7", "Name": "7-Eleven"})
+    run = SimpleNamespace(access_token="tok", org=ORG, entity=connected.entity)
+
+    assert contacts.xero_id_for(run, own) == "con-7"
+    own.refresh_from_db()
+    assert (own.xero_contact_id, own.name) == ("con-7", "7-Eleven")
+    assert Bill.objects.get(id=bill.id).contact_name == "7-Eleven"
+
+
 def test_a_name_typed_another_way_is_that_supplier_never_a_second(client, connected, http):
     """The user, 2026-11-23: case, spaces and punctuation are ignored ("7 Eleven" is "7-Eleven")."""
     linked = XeroContactSync.objects.create(entity_id=connected.entity.id, name="7-Eleven",
@@ -213,6 +250,8 @@ def test_xeros_contact_typed_another_way_is_found_and_linked_never_a_twin(client
     resp = _post(client, connected, {"name": "7 Eleven"})
 
     assert resp.status_code == 201 and resp.json()["id"] == "con-7"
+    # Xero's name at the link (the user, 2026-11-27), never a silent flip at the next sync
+    assert XeroContactSync.objects.get(entity_id=connected.entity.id, xero_contact_id="con-7").name == "7-ELEVEN"
     assert [s["params"]["searchTerm"] for s in http.searched] == ["Eleven"]
     assert [s["url"] for s in http.sent] == [TOKEN_URL]  # nothing made in Xero
 
@@ -278,7 +317,7 @@ def test_a_live_company_links_to_xeros_contact_of_that_name_before_making_one(cl
     resp = _post(client, connected, {"name": "CORNER BAKERY"})
 
     assert resp.status_code == 201
-    assert _synced(connected) == {"con-kept": "CORNER BAKERY"}
+    assert _synced(connected) == {"con-kept": "Corner Bakery"}  # Xero's name at the link (2026-11-27)
     assert http.sent == []  # nothing asked of Xero: no duplicate there
 
 
@@ -291,7 +330,7 @@ def test_a_live_company_links_to_the_contact_xero_has_of_that_name_never_a_twin(
     resp = _post(client, connected, {"name": "Corner Bakery"})
 
     assert resp.status_code == 201 and resp.json()["id"] == "con-cb"
-    assert _synced(connected) == {"con-cb": "Corner Bakery"}
+    assert _synced(connected) == {"con-cb": "CORNER  BAKERY"}  # Xero's name at the link (2026-11-27)
     assert [s["url"] for s in http.sent] == [TOKEN_URL]  # the token only: nothing made in Xero
 
 

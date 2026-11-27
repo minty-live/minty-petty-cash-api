@@ -17,7 +17,7 @@ import logging
 
 import requests
 from django.conf import settings
-from minty_db.models import XeroContactSync
+from minty_db.models import Bill, XeroContactSync
 from minty_shared import names
 
 logger = logging.getLogger("petty-cash-api")
@@ -96,7 +96,20 @@ def found_or_made(access_token: str, org, name: str) -> dict:
     return find_by_name(access_token, org, name) or make_supplier(access_token, org, name)
 
 
-def _store(run, contact: XeroContactSync, guid: str) -> str:
+def take_xero_name(entity_id, contact: XeroContactSync, xero_name) -> None:
+    """A supplier linked to a Xero contact takes Xero's name at the link (the user, 2026-11-27: linked
+    contacts are changed in Xero and Minty follows - never a silent flip at the next sync); the bills
+    on it follow at once (contacts are shared with Payment Request)."""
+    name = (xero_name or "").strip()[:150]
+    if not name or name == contact.name:
+        return
+    XeroContactSync.objects.filter(id=contact.id).update(name=name)
+    contact.name = name
+    Bill.objects.filter(entity_id=entity_id, contact_id=contact.id).exclude(contact_name=name[:100]).update(
+        contact_name=name[:100])
+
+
+def _store(run, contact: XeroContactSync, guid: str, xero_name=None) -> str:
     """``guid`` on this Minty contact. Another of the company's contacts already holding it (one
     Xero contact, one row): the publish names it, and this row is left as it is (logged)."""
     holder = (XeroContactSync.objects.filter(entity_id=run.entity.id, xero_contact_id=guid)
@@ -107,6 +120,7 @@ def _store(run, contact: XeroContactSync, guid: str) -> str:
         return guid
     XeroContactSync.objects.filter(id=contact.id).update(xero_contact_id=guid, xero_org_id=str(run.org))
     contact.xero_contact_id = guid
+    take_xero_name(run.entity.id, contact, xero_name)
     return guid
 
 
@@ -120,7 +134,7 @@ def xero_id_for(run, contact: XeroContactSync) -> str | None:
         made = found_or_made(run.access_token, run.org, contact.name)
     except XeroContactUnavailable:
         return None
-    return _store(run, contact, made["ContactID"])
+    return _store(run, contact, made["ContactID"], made.get("Name"))
 
 
 def ensure_contact(run, contact_id: str, name: str | None) -> str | None:

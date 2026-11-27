@@ -39,7 +39,9 @@ minty-petty-cash-web draws the same cards for it, titled _Account mapping_, with
 **A disconnected company keeps its organisation** (2026-11-10, minty-accounts-api's disconnect). The
 Xero actions here already go by `status` (publish, the Xero cards' `is_live`, a supplier at Xero
 answers "reconnect"); Settings' `xero_connected` now does too (`bool(xero_org_id) and status !=
-'disconnected'`). Its kept accounts and mapping keep daily closing working. A supplier it adds is kept
+'disconnected'`). Its kept accounts and mapping keep daily closing working. A supplier linked to an existing
+Xero contact - at "+ Add" while live (C5) or at publish (C1) - takes Xero's name and its bills follow
+(`xero/contacts.take_xero_name`; the user, 2026-11-27). A supplier it adds is kept
 in Minty and marked (`minty_changed_at`; the user, 2026-11-27: disconnected = Minty-only), so the
 reconnect's matching asks about it (accounts-api `needs_matching`). An account or supplier archived in
 Settings is out of the pickers (its `entity_account_xero` tick off; `suppliers` reads active rows only)

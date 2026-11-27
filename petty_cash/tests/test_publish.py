@@ -667,8 +667,8 @@ def test_a_contact_xero_has_by_name_is_linked_at_publish_never_made(mapped, xero
 
     assert report.publishing_status == "completed"
     assert xero.sent("POST", "Contacts") == []
-    own = XeroContactSync.objects.get(entity_id=mapped.entity.id, name="Kee Wah")
-    assert (own.xero_contact_id, own.xero_org_id) == ("con-kee", ORG)
+    own = XeroContactSync.objects.get(entity_id=mapped.entity.id, xero_contact_id="con-kee")
+    assert (own.name, own.xero_org_id) == ("KEE  WAH", ORG)  # Xero's name at the link (2026-11-27)
     assert xero.sent("POST", "BankTransactions")[0]["bankTransactions"][0]["contact"] == {"contactID": "con-kee"}
 
 
